@@ -1,0 +1,34 @@
+set_wifi_credentials:
+  name: Set Wi-Fi credentials
+  description: >
+    Write Wi-Fi credentials to a configured GROW meter through the currently
+    loaded Modbus route. This enables Wi-Fi support, writes the SSID and
+    password registers, then optionally applies the settings with the Wi-Fi
+    apply command.
+  fields:
+    serial_number:
+      name: Serial number
+      description: The immutable 12-digit GROW serial number of the target meter.
+      required: true
+      selector:
+        text:
+    ssid:
+      name: Wi-Fi SSID
+      description: The Wi-Fi network name to write to the meter.
+      required: true
+      selector:
+        text:
+    password:
+      name: Wi-Fi password
+      description: The Wi-Fi password to write to the meter.
+      required: true
+      selector:
+        text:
+          type: password
+    apply:
+      name: Apply settings
+      description: Send the Wi-Fi settings apply command after writing the credentials.
+      required: false
+      default: true
+      selector:
+        boolean:
