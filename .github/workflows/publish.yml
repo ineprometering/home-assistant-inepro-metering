@@ -1,0 +1,141 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version to publish, for example 0.1.1
+        required: true
+        type: string
+      confirmation:
+        description: Type "publish <version>" to confirm
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-publish-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify release artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Validate release input
+        id: release
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+
+          expected_version = os.environ["EXPECTED_VERSION"]
+          confirmation = os.environ["CONFIRMATION"]
+          with open("pyproject.toml", "rb") as pyproject_file:
+              version = tomllib.load(pyproject_file)["project"]["version"]
+          if version != expected_version:
+              raise SystemExit(
+                  f"Workflow input version {expected_version!r} does not match pyproject version {version!r}"
+              )
+          if confirmation != f"publish {version}":
+              raise SystemExit(
+                  f"Confirmation must be exactly 'publish {version}'"
+              )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"version={version}", file=output)
+          PY
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "This workflow must be run from a release tag, not $GITHUB_REF_TYPE $GITHUB_REF_NAME"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v$EXPECTED_VERSION" ]; then
+            echo "Selected ref must be tag v$EXPECTED_VERSION, got $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Install release tooling and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[test,build,security]
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Audit runtime dependencies
+        run: python -m pip_audit . --progress-spinner off
+
+      - name: Generate release SBOM
+        run: |
+          mkdir -p release-evidence/sbom
+          python scripts/generate_sbom.py \
+            --release-version "${{ steps.release.outputs.version }}" \
+            --output "release-evidence/sbom/inepro-metering-${{ steps.release.outputs.version }}.spdx.json" \
+            --git-ref "${{ github.sha }}"
+
+      - name: Validate SBOM JSON
+        run: python -m json.tool "release-evidence/sbom/inepro-metering-${{ steps.release.outputs.version }}.spdx.json" > /dev/null
+
+      - name: Build package artifacts
+        run: python -m build
+
+      - name: Check package artifacts
+        run: python -m twine check dist/*
+
+      - name: Verify clean wheel install
+        run: |
+          python -m venv .venv-verify
+          . .venv-verify/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir "dist/inepro_metering-${{ steps.release.outputs.version }}-py3-none-any.whl"
+          python -c "import inepro_metering; print(inepro_metering.__version__)"
+          python -c "import inepro_metering; raise SystemExit(inepro_metering.__version__ != '${{ steps.release.outputs.version }}')"
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Upload release SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-sbom
+          path: release-evidence/sbom/*.spdx.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish package distributions
+        uses: pypa/gh-action-pypi-publish@release/v1
