@@ -106,7 +106,7 @@ async def test_setup_entry_uses_runtime_data_and_service_survives_unload(
             SERVICE_SET_WIFI_CREDENTIALS,
             {
                 "serial_number": "075625100001",
-                "ssid": "IneproLab",
+                "ssid": "ExampleNet",
                 "password": "secret",
             },
             blocking=True,

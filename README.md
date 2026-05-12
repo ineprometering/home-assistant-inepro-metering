@@ -14,13 +14,13 @@ Assistant integration and the reusable Python package.
 The integration manifest pins:
 
 ```text
-inepro-metering==0.1.0
+inepro-metering==0.1.1
 ```
 
 Install the Python package directly with:
 
 ```bash
-pip install inepro-metering==0.1.0
+pip install inepro-metering==0.1.1
 ```
 
 ## High-level capabilities
@@ -46,4 +46,3 @@ rating.
 Public source repository:
 
 https://github.com/ineprometering/home-assistant-inepro-metering
-

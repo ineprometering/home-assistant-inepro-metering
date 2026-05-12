@@ -94,7 +94,7 @@ def _register_map() -> dict[int, int]:
     add(0x503A, _encode_float(0.2))
     add(0x503C, _encode_float(24.5))
     add(0x6000, _encode_int32(9845))
-    add(0x600C, _encode_uint32(12345))
+    add(0x600C, _encode_uint32(123456))
     add(0x6018, _encode_uint32(2500))
     add(0x6030, _encode_uint32(4800))
     add(0x603C, _encode_uint32(300))
@@ -127,7 +127,7 @@ def _register_map_grow_750() -> dict[int, int]:
         for offset, word in enumerate(words):
             registers[address + offset] = word
 
-    add(0x4000, [0x2510, 0x0001])
+    add(0x4000, [0x2548, 0x0002])
     add(0x4002, [0x0756])
     add(0x4005, _encode_float(1.0))
     add(0x4007, _encode_float(1.0))
@@ -463,7 +463,12 @@ async def test_setup_entry_creates_expected_sensor_entities(
     assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get("sensor.test_meter_status").state == "online"
     assert float(hass.states.get("sensor.test_meter_total_active_power").state) == 3.2
-    assert float(hass.states.get("sensor.test_meter_forward_active_energy").state) == 12.345
+    forward_energy = hass.states.get("sensor.test_meter_forward_active_energy")
+    assert forward_energy is not None
+    assert float(forward_energy.state) == 123.456
+    assert forward_energy.attributes["device_class"] == "energy"
+    assert forward_energy.attributes["state_class"] == "total_increasing"
+    assert forward_energy.attributes["unit_of_measurement"] == "kWh"
     assert hass.states.get("sensor.test_meter_serial_number").state == "25150002"
     assert hass.states.get("sensor.test_meter_product_code").state == "0850"
     assert hass.states.get("sensor.test_meter_error_code").state == "0000"
@@ -536,6 +541,12 @@ async def test_setup_entry_creates_expected_pro_sensor_entities(
     assert float(hass.states.get("sensor.pro_meter_current_l3").state) == 10.2
     assert float(hass.states.get("sensor.pro_meter_total_active_power").state) == 6.789
     assert float(hass.states.get("sensor.pro_meter_total_active_energy").state) == 1234.567
+    pro_forward_energy = hass.states.get("sensor.pro_meter_forward_active_energy")
+    assert pro_forward_energy is not None
+    assert float(pro_forward_energy.state) == 1200.125
+    assert pro_forward_energy.attributes["device_class"] == "energy"
+    assert pro_forward_energy.attributes["state_class"] == "total_increasing"
+    assert pro_forward_energy.attributes["unit_of_measurement"] == "kWh"
     assert hass.states.get("sensor.pro_meter_serial_number").state == "12345678"
     assert hass.states.get("sensor.pro_meter_protocol_version").state == "2.18"
     assert hass.states.get("sensor.pro_meter_software_version").state == "2.18"
@@ -737,10 +748,10 @@ async def test_serial_bus_entry_creates_multiple_meter_devices(
                     "product_code": "0851",
                 },
                 {
-                    "name": "075625100001",
+                    "name": "000000000001",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "075625100001",
+                    "serial_number": "000000000001",
                     "product_code": "0756",
                 },
             ],
@@ -758,21 +769,21 @@ async def test_serial_bus_entry_creates_multiple_meter_devices(
 
     assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get("sensor.085125250008_status").state == "online"
-    assert hass.states.get("sensor.075625100001_status").state == "online"
+    assert hass.states.get("sensor.000000000001_status").state == "online"
     assert float(hass.states.get("sensor.085125250008_average_voltage_ln").state) == 230.5
     assert hass.states.get("sensor.085125250008_error_summary").state == "No critical errors"
-    assert hass.states.get("sensor.075625100001_error_summary").state == "No critical errors"
-    assert float(hass.states.get("sensor.075625100001_average_voltage_ln").state) == 236.9
-    assert float(hass.states.get("sensor.075625100001_voltage_l1").state) == 236.7
+    assert hass.states.get("sensor.000000000001_error_summary").state == "No critical errors"
+    assert float(hass.states.get("sensor.000000000001_average_voltage_ln").state) == 236.9
+    assert float(hass.states.get("sensor.000000000001_voltage_l1").state) == 236.7
     assert hass.states.get("sensor.085125250008_product_name").state == "879-3121"
-    assert hass.states.get("sensor.075625100001_product_name").state == "879-3120"
-    assert hass.states.get("sensor.075625100001_device_version").state == "V1.0.2744"
+    assert hass.states.get("sensor.000000000001_product_name").state == "879-3120"
+    assert hass.states.get("sensor.000000000001_device_version").state == "V1.0.2744"
     assert (
-        hass.states.get("sensor.075625100001_legal_software_version").state
+        hass.states.get("sensor.000000000001_legal_software_version").state
         == "1.0 (B478FEE9)"
     )
-    assert hass.states.get("sensor.075625100001_wi_fi_support").state == "enabled"
-    assert hass.states.get("switch.075625100001_wi_fi_support").state == "on"
+    assert hass.states.get("sensor.000000000001_wi_fi_support").state == "enabled"
+    assert hass.states.get("switch.000000000001_wi_fi_support").state == "on"
     assert hass.states.get("switch.085125250008_wi_fi_support") is None
 
     device_registry = dr.async_get(hass)
@@ -780,7 +791,7 @@ async def test_serial_bus_entry_creates_multiple_meter_devices(
         identifiers={(DOMAIN, "085125250008")}
     )
     three_phase = device_registry.async_get_device(
-        identifiers={(DOMAIN, "075625100001")}
+        identifiers={(DOMAIN, "000000000001")}
     )
     assert single_phase is not None
     assert three_phase is not None
@@ -814,10 +825,10 @@ async def test_tcp_gateway_bus_entry_exposes_bus_level_gateway_device(
                     "product_code": "0851",
                 },
                 {
-                    "name": "075625100001",
+                    "name": "000000000001",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "075625100001",
+                    "serial_number": "000000000001",
                     "product_code": "0756",
                 },
             ],
@@ -846,7 +857,7 @@ async def test_tcp_gateway_bus_entry_exposes_bus_level_gateway_device(
         == "033023260024"
     )
     assert hass.states.get("sensor.085125250008_status").state == "online"
-    assert hass.states.get("sensor.075625100001_status").state == "online"
+    assert hass.states.get("sensor.000000000001_status").state == "online"
 
     gateway_device = dr.async_get(hass).async_get_device(
         identifiers={(DOMAIN, "033023260024")}
@@ -855,7 +866,7 @@ async def test_tcp_gateway_bus_entry_exposes_bus_level_gateway_device(
         identifiers={(DOMAIN, "085125250008")}
     )
     three_phase = dr.async_get(hass).async_get_device(
-        identifiers={(DOMAIN, "075625100001")}
+        identifiers={(DOMAIN, "000000000001")}
     )
     assert gateway_device is not None
     assert gateway_device.identifiers == {(DOMAIN, "033023260024")}
@@ -881,7 +892,7 @@ async def test_tcp_gateway_bus_keeps_meter_online_when_status_blocks_fail(
             CONF_FAMILY: MeterFamily.PRO.value,
             CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
             CONF_SCAN_INTERVAL: 15,
-            "host": "192.0.2.16",
+            "host": "192.0.2.10",
             "port": 502,
             CONF_TIMEOUT: 10,
             CONF_METERS: [
@@ -921,12 +932,12 @@ async def test_tcp_gateway_bus_entry_with_no_meters_loads_gateway_device(
     """A verified TCP gateway with no meters should still load as a device."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="Inepro Gateway 192.0.2.13:502",
+        title="Inepro Gateway 203.0.113.20:502",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
             CONF_SCAN_INTERVAL: 15,
-            "host": "192.0.2.13",
+            "host": "203.0.113.20",
             "port": 502,
             CONF_TIMEOUT: 3,
             CONF_METERS: [],
@@ -1014,7 +1025,7 @@ async def test_bluetooth_proxy_coordinator_keeps_last_data_on_transient_failures
             "host": "203.0.113.10",
             "port": 15026,
             "bluetooth_address": "80:F1:B2:58:DD:5A",
-            "bluetooth_name": "IM-075625100001",
+            "bluetooth_name": "IM-000000000001",
             CONF_TIMEOUT: 3,
         },
     )
@@ -1058,7 +1069,7 @@ async def test_bluetooth_proxy_coordinator_keeps_last_data_on_short_payloads(
             "host": "203.0.113.10",
             "port": 15026,
             "bluetooth_address": "80:F1:B2:58:DD:5A",
-            "bluetooth_name": "IM-075625100001",
+            "bluetooth_name": "IM-000000000001",
             CONF_TIMEOUT: 3,
         },
     )
@@ -1107,10 +1118,10 @@ async def test_set_wifi_credentials_service_writes_grow_register_sequence(
                     "product_code": "0851",
                 },
                 {
-                    "name": "075625100001",
+                    "name": "000000000001",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "075625100001",
+                    "serial_number": "000000000001",
                     "product_code": "0756",
                 },
             ],
@@ -1129,8 +1140,8 @@ async def test_set_wifi_credentials_service_writes_grow_register_sequence(
             DOMAIN,
             "set_wifi_credentials",
             {
-                "serial_number": "075625100001",
-                "ssid": "IneproLab",
+                "serial_number": "000000000001",
+                "ssid": "ExampleNet",
                 "password": "secret",
                 "apply": True,
             },
@@ -1141,7 +1152,7 @@ async def test_set_wifi_credentials_service_writes_grow_register_sequence(
     assert len(client.writes) == 4
     assert client.writes[0] == ("register", 157, WIFI_ENABLE_ADDRESS, 1)
     assert client.writes[1][:3] == ("registers", 157, WIFI_SSID_ADDRESS)
-    assert client.writes[1][3][:5] == (0x496E, 0x6570, 0x726F, 0x4C61, 0x6200)
+    assert client.writes[1][3][:5] == (0x4578, 0x616D, 0x706C, 0x654E, 0x6574)
     assert client.writes[2][:3] == ("registers", 157, WIFI_PASSWORD_ADDRESS)
     assert client.writes[2][3][:3] == (0x7365, 0x6372, 0x6574)
     assert client.writes[3] == ("registers", 157, WIFI_APPLY_ADDRESS, (1,))
@@ -1168,10 +1179,10 @@ async def test_set_wifi_credentials_service_rejects_unknown_serial_before_write(
             CONF_TIMEOUT: 3,
             CONF_METERS: [
                 {
-                    "name": "075625100001",
+                    "name": "000000000001",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "075625100001",
+                    "serial_number": "000000000001",
                     "product_code": "0756",
                 },
             ],
@@ -1192,7 +1203,7 @@ async def test_set_wifi_credentials_service_rejects_unknown_serial_before_write(
                 "set_wifi_credentials",
                 {
                     "serial_number": "000000000000",
-                    "ssid": "IneproLab",
+                    "ssid": "ExampleNet",
                     "password": "secret",
                     "apply": False,
                 },
@@ -1228,10 +1239,10 @@ async def test_set_wifi_credentials_service_rejects_invalid_credentials_before_w
             CONF_TIMEOUT: 3,
             CONF_METERS: [
                 {
-                    "name": "075625100001",
+                    "name": "000000000001",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "075625100001",
+                    "serial_number": "000000000001",
                     "product_code": "0756",
                 },
             ],
@@ -1251,7 +1262,7 @@ async def test_set_wifi_credentials_service_rejects_invalid_credentials_before_w
                 DOMAIN,
                 "set_wifi_credentials",
                 {
-                    "serial_number": "075625100001",
+                    "serial_number": "000000000001",
                     "ssid": "",
                     "password": "secret",
                     "apply": False,
@@ -1295,10 +1306,10 @@ async def test_wifi_support_switch_toggles_confirmed_register(
                     "product_code": "0851",
                 },
                 {
-                    "name": "075625100001",
+                    "name": "000000000001",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "075625100001",
+                    "serial_number": "000000000001",
                     "product_code": "0756",
                 },
             ],
@@ -1316,13 +1327,13 @@ async def test_wifi_support_switch_toggles_confirmed_register(
         await hass.services.async_call(
             SWITCH_DOMAIN,
             "turn_off",
-            {"entity_id": "switch.075625100001_wi_fi_support"},
+            {"entity_id": "switch.000000000001_wi_fi_support"},
             blocking=True,
         )
         await hass.services.async_call(
             SWITCH_DOMAIN,
             "turn_on",
-            {"entity_id": "switch.075625100001_wi_fi_support"},
+            {"entity_id": "switch.000000000001_wi_fi_support"},
             blocking=True,
         )
 
@@ -1361,10 +1372,10 @@ async def test_set_wifi_credentials_service_rejects_non_wifi_model(
                     "product_code": "0851",
                 },
                 {
-                    "name": "075625100001",
+                    "name": "000000000001",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "075625100001",
+                    "serial_number": "000000000001",
                     "product_code": "0756",
                 },
             ],
@@ -1385,7 +1396,7 @@ async def test_set_wifi_credentials_service_rejects_non_wifi_model(
                 "set_wifi_credentials",
                 {
                     "serial_number": "085125250008",
-                    "ssid": "IneproLab",
+                    "ssid": "ExampleNet",
                     "password": "secret",
                 },
                 blocking=True,

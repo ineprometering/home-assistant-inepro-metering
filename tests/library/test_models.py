@@ -120,6 +120,26 @@ def test_grow_profile_titles_use_product_names() -> None:
     assert get_profile(MeterFamily.GROW, "grow_850").title == "GROW 1P1U"
 
 
+def test_grow_active_energy_metadata_converts_wh_registers_to_kwh() -> None:
+    """GROW active energy definitions should expose HA-friendly kWh values."""
+    profile = get_profile(MeterFamily.GROW, "grow_850")
+    sensors = {sensor.key: sensor for sensor in profile.measurement_sensors}
+
+    expected_state_classes = {
+        "total_active_energy": "total",
+        "forward_active_energy": "total_increasing",
+        "reverse_active_energy": "total_increasing",
+    }
+
+    for key, state_class in expected_state_classes.items():
+        sensor = sensors[key]
+        assert sensor.device_class == "energy"
+        assert sensor.state_class == state_class
+        assert sensor.native_unit_of_measurement == "kWh"
+        assert sensor.register_unit == "Wh"
+        assert sensor.scale == 0.001
+
+
 def test_pro_profiles_support_serial_and_gateway_bus_access() -> None:
     """All supported PRO profiles should expose RTU plus TCP gateway bus access."""
     for variant in PRO_VARIANTS:
@@ -150,6 +170,26 @@ def test_pro_profile_titles_match_product_names() -> None:
         variant: get_profile(MeterFamily.PRO, variant).title
         for variant in PRO_VARIANTS
     } == expected_titles
+
+
+def test_pro_active_energy_metadata_uses_pro_kwh_registers_directly() -> None:
+    """PRO active energy definitions should not inherit GROW Wh scaling."""
+    profile = get_profile(MeterFamily.PRO, "pro_380")
+    sensors = {sensor.key: sensor for sensor in profile.measurement_sensors}
+
+    expected_state_classes = {
+        "total_active_energy": "total",
+        "forward_active_energy": "total_increasing",
+        "reverse_active_energy": "total_increasing",
+    }
+
+    for key, state_class in expected_state_classes.items():
+        sensor = sensors[key]
+        assert sensor.device_class == "energy"
+        assert sensor.state_class == state_class
+        assert sensor.native_unit_of_measurement == "kWh"
+        assert sensor.register_unit == "kWh"
+        assert sensor.scale == 1.0
 
 
 def test_pro_single_phase_profiles_expose_single_phase_measurements() -> None:

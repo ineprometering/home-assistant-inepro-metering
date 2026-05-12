@@ -48,15 +48,16 @@ def test_decode_float_sensor_value() -> None:
 
 
 def test_decode_scaled_energy_sensor_value() -> None:
-    """Raw Wh register values should scale to kWh."""
+    """Raw GROW Wh active-energy register values should scale to kWh."""
     profile = get_profile(MeterFamily.GROW, "grow_850")
-    sensor = next(
-        description
-        for description in profile.measurement_sensors
-        if description.key == "forward_active_energy"
-    )
+    sensors = {description.key: description for description in profile.measurement_sensors}
 
-    assert decode_sensor_value(sensor, _uint32_registers(12345)) == 12.345
+    for key in (
+        "total_active_energy",
+        "forward_active_energy",
+        "reverse_active_energy",
+    ):
+        assert decode_sensor_value(sensors[key], _uint32_registers(123456)) == 123.456
 
 
 def test_decode_bcd_diagnostic_value() -> None:
@@ -84,7 +85,7 @@ def test_decode_option_mapped_diagnostic_value() -> None:
 
 
 def test_decode_pro_float_energy_sensor_value() -> None:
-    """PRO energy registers should decode directly from Float ABCD kWh values."""
+    """PRO energy registers should decode independently from GROW Wh scaling."""
     profile = get_profile(MeterFamily.PRO, "pro_380")
     sensor = next(
         description
@@ -92,7 +93,9 @@ def test_decode_pro_float_energy_sensor_value() -> None:
         if description.key == "forward_active_energy"
     )
 
-    assert decode_sensor_value(sensor, _float_registers(1234.567)) == 1234.567
+    assert sensor.scale == 1.0
+    assert sensor.register_unit == "kWh"
+    assert decode_sensor_value(sensor, _float_registers(123456.0)) == 123456.0
 
 
 def test_decode_pro_hex_serial_value() -> None:
