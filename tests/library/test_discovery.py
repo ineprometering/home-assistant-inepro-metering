@@ -31,15 +31,15 @@ from inepro_metering.modbus import (
 
 def test_parse_grow_serial_number() -> None:
     """GROW serial numbers should expose product and production details."""
-    parsed = parse_grow_serial_number("075625100001")
+    parsed = parse_grow_serial_number("075625480002")
 
     assert parsed is not None
-    assert parsed.serial_number == "075625100001"
+    assert parsed.serial_number == "075625480002"
     assert parsed.product_code == "0756"
     assert parsed.production_year_code == 25
     assert parsed.production_year == 2025
-    assert parsed.production_week == 10
-    assert parsed.sequence == 1
+    assert parsed.production_week == 48
+    assert parsed.sequence == 2
 
 
 def test_parse_grow_serial_number_rejects_invalid_week() -> None:
@@ -62,7 +62,7 @@ def test_parse_grow_bluetooth_name_uses_full_serial() -> None:
 def test_infer_grow_variant_from_product_prefixes() -> None:
     """Known product prefixes should map to the current GROW profiles."""
     assert infer_grow_variant("070125100001") == "grow_701"
-    assert infer_grow_variant("075625100001") == "grow_750"
+    assert infer_grow_variant("075625480002") == "grow_750"
     assert infer_grow_variant("080125100001") == "grow_800"
     assert infer_grow_variant("085125250008") == "grow_850"
     assert infer_grow_variant(None, "0756") == "grow_750"
@@ -70,7 +70,7 @@ def test_infer_grow_variant_from_product_prefixes() -> None:
 
 def test_build_grow_serial_number_requires_valid_product_and_tail() -> None:
     """The shared serial-number builder should validate the resulting GROW serial."""
-    assert build_grow_serial_number("0756", "25100001") == "075625100001"
+    assert build_grow_serial_number("0756", "25480002") == "075625480002"
     assert build_grow_serial_number("0756", "00000000") is None
 
 
@@ -81,7 +81,7 @@ class _FakeIdentityClient:
         del register_type, count
         assert slave_id == 7
         if address == 0x4000:
-            return [0x2510, 0x0001]
+            return [0x2548, 0x0002]
         if address == 0x4025:
             return [0x0756]
         raise AssertionError(f"Unexpected address {address:#06x}")
@@ -133,7 +133,7 @@ class _FakeBusDiscoveryClient:
 async def test_async_read_grow_serial_number_reads_live_identity() -> None:
     """The shared discovery helper should own the live GROW serial-number read."""
     assert await async_read_grow_serial_number(_FakeIdentityClient(), slave_id=7) == (
-        "075625100001"
+        "075625480002"
     )
 
 
@@ -219,12 +219,12 @@ def test_tcp_gateway_udp_response_rejects_grow_meter_serial() -> None:
     """Ethernet-capable GROW meters must not be listed as TCP gateways."""
     message = bytearray(57)
     message[:6] = bytes.fromhex("00134D800085")
-    message[17:29] = b"075625100001"
+    message[17:29] = b"075625480002"
 
     assert (
         discovery_module._parse_tcp_gateway_discovery_response(
             bytes(message),
-            host="192.0.2.10",
+            host="192.168.68.76",
         )
         is None
     )
@@ -234,17 +234,17 @@ def test_tcp_gateway_udp_response_accepts_gateway_serial() -> None:
     """Real gateway serials from the UDP browse response should still be accepted."""
     message = bytearray(57)
     message[:6] = bytes.fromhex("00134D70010C")
-    message[17:29] = b"000000000003"
+    message[17:29] = b"033023260133"
 
     gateway = discovery_module._parse_tcp_gateway_discovery_response(
         bytes(message),
-        host="192.0.2.13",
+        host="192.168.68.85",
     )
 
     assert gateway == DiscoveredTcpGateway(
-        host="192.0.2.13",
+        host="192.168.68.85",
         mac_address="00:13:4D:70:01:0C",
-        serial_number="000000000003",
+        serial_number="033023260133",
     )
 
 
@@ -284,7 +284,7 @@ def test_candidate_ble_proxy_hosts_includes_resolver_nameserver() -> None:
     with patch.object(
         discovery_module,
         "_read_default_route_gateway_host",
-        return_value="203.0.113.10",
+        return_value="172.28.224.1",
     ), patch.object(
         discovery_module,
         "_read_resolver_nameserver_host",
@@ -294,7 +294,7 @@ def test_candidate_ble_proxy_hosts_includes_resolver_nameserver() -> None:
             discovery_module.DEFAULT_BLUETOOTH_PROXY_HOST
         )
 
-    assert hosts == ("localhost", "203.0.113.10", "10.255.255.254")
+    assert hosts == ("localhost", "172.28.224.1", "10.255.255.254")
 
 
 async def test_proxy_discovery_falls_back_to_gateway_host() -> None:
@@ -307,7 +307,7 @@ async def test_proxy_discovery_falls_back_to_gateway_host() -> None:
                 "devices": [
                     {
                         "address": "80:F1:B2:58:DD:5A",
-                        "name": "IM-075625100001",
+                        "name": "IM-075625480002",
                         "rssi": -88,
                     }
                 ],
@@ -318,7 +318,7 @@ async def test_proxy_discovery_falls_back_to_gateway_host() -> None:
     with patch.object(
         discovery_module,
         "_read_default_route_gateway_host",
-        return_value="203.0.113.10",
+        return_value="172.28.224.1",
     ), patch.object(
         discovery_module,
         "_read_resolver_nameserver_host",
@@ -336,10 +336,10 @@ async def test_proxy_discovery_falls_back_to_gateway_host() -> None:
 
     assert len(meters) == 1
     meter = meters[0]
-    assert meter.serial_number == "075625100001"
+    assert meter.serial_number == "075625480002"
     assert meter.address == "80:F1:B2:58:DD:5A"
     assert meter.transport is discovery_module.TransportType.BLUETOOTH_PROXY
-    assert meter.proxy_host == "203.0.113.10"
+    assert meter.proxy_host == "172.28.224.1"
     assert meter.proxy_port == discovery_module.DEFAULT_BLUETOOTH_PROXY_PORT
     assert request_mock.await_args_list[0].kwargs == {
         "host": "localhost",
@@ -347,7 +347,7 @@ async def test_proxy_discovery_falls_back_to_gateway_host() -> None:
         "timeout": 5.0,
     }
     assert request_mock.await_args_list[1].kwargs == {
-        "host": "203.0.113.10",
+        "host": "172.28.224.1",
         "port": discovery_module.DEFAULT_BLUETOOTH_PROXY_PORT,
         "timeout": 5.0,
     }

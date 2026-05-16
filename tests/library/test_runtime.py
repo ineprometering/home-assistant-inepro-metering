@@ -14,7 +14,7 @@ def test_build_meter_runtime_data_extracts_identity_versions_and_settings() -> N
         profile=get_profile(MeterFamily.GROW, "grow_750"),
         route=MeterRoute(transport=TransportType.SERIAL, slave_id=157),
         readings={
-            "serial_number": "25100001",
+            "serial_number": "25480002",
             "product_code": "0756",
             "legal_software_version": 1.0,
             "legal_software_crc": "B478FEE9",
@@ -27,7 +27,7 @@ def test_build_meter_runtime_data_extracts_identity_versions_and_settings() -> N
         last_successful_update=last_success,
     )
 
-    assert meter.identity.device_serial == "075625100001"
+    assert meter.identity.device_serial == "075625480002"
     assert meter.firmware.formatted_version("legal_software_version") == "1.0 (B478FEE9)"
     assert meter.firmware.software_version == "legal 1.0 (B478FEE9) / non-legal 1.0 (B999F660)"
     assert meter.firmware.hardware_version == "2.03"

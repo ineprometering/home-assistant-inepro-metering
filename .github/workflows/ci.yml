@@ -26,8 +26,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[test]
 
-      - name: Run tests
-        run: python -m pytest
+      - name: Run package tests
+        run: python -m pytest --confcutdir=tests/library tests/library
 
   supply-chain:
     name: Supply Chain

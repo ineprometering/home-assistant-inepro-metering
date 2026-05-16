@@ -23,6 +23,18 @@ Install the Python package directly with:
 pip install inepro-metering==0.1.2
 ```
 
+## Release validation
+
+The public package release workflow validates the reusable
+`src/inepro_metering` library with
+`python -m pytest --confcutdir=tests/library tests/library`, audits the runtime
+dependencies, generates an SPDX SBOM, builds the wheel and source distribution,
+and verifies a clean wheel install.
+
+Home Assistant integration tests are validated in the matching Home Assistant
+Core PR branch, where the copied integration code runs against the current Core
+test harness.
+
 ## High-level capabilities
 
 - Modbus TCP setup for supported meters.

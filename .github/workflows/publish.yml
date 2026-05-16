@@ -76,8 +76,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[test,build,security]
 
-      - name: Run tests
-        run: python -m pytest
+      - name: Run package tests
+        run: python -m pytest --confcutdir=tests/library tests/library
 
       - name: Audit runtime dependencies
         run: python -m pip_audit . --progress-spinner off
