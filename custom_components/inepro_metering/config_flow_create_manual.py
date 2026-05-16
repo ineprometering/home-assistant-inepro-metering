@@ -1,13 +1,13 @@
 """Manual creation workflow steps for the Inepro Metering config flow."""
 
-from __future__ import annotations
+from typing import Any, cast
 
-from typing import Any
-
-from homeassistant.config_entries import SOURCE_RECONFIGURE
+from homeassistant.config_entries import SOURCE_RECONFIGURE, ConfigFlowResult
 from homeassistant.const import CONF_NAME, CONF_SCAN_INTERVAL
 from homeassistant.data_entry_flow import FlowResult
 
+from .bluetooth import IneproBluetoothDeviceNotFound
+from .config_flow_protocols import IneproFlowProtocol
 from .config_flow_schemas import (
     UNSELECTED_TRANSPORT,
     build_connection_schema,
@@ -17,8 +17,8 @@ from .config_flow_schemas import (
     build_setup_method_schema,
     build_transport_schema,
 )
-from .bluetooth import IneproBluetoothDeviceNotFound
 from .config_flow_shared import (
+    IneproIdentityError,
     bluetooth_gatt_validation_data,
     bluetooth_modbus_pairing_validation_data,
     bluetooth_setup_identity_error_reason,
@@ -28,7 +28,6 @@ from .config_flow_shared import (
     normalize_connection_data,
     user_visible_transports,
 )
-from .config_flow_shared import IneproIdentityError
 from .const import (
     CONF_DEVICE_KIND,
     CONF_FAMILY,
@@ -37,6 +36,8 @@ from .const import (
     CONF_SLAVE_ID,
     CONF_TRANSPORT,
     CONF_VARIANT,
+    DEFAULT_BLUETOOTH_SCAN_INTERVAL,
+    DEFAULT_SCAN_INTERVAL,
     DEVICE_KIND_GATEWAY,
     SETUP_METHOD_SCAN_BLUETOOTH,
     SETUP_METHOD_SCAN_SERIAL,
@@ -44,7 +45,6 @@ from .const import (
     MeterFamily,
     TransportType,
 )
-from .discovery import parse_grow_serial_number
 from .entry_data import (
     ConfiguredMeter,
     build_route_from_entry_data,
@@ -62,10 +62,12 @@ from .models import (
 )
 
 
-class CreateManualFlowMixin:
+class CreateManualFlowMixin(IneproFlowProtocol):
     """Manual creation steps for new Inepro Metering entries."""
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Handle the initial meter-vs-gateway selection step."""
         if user_input is not None:
             if CONF_FAMILY in user_input:
@@ -73,20 +75,34 @@ class CreateManualFlowMixin:
                     CONF_FAMILY: MeterFamily(user_input[CONF_FAMILY]).value,
                 }
                 if self._selected_family is MeterFamily.GROW:
-                    return await self.async_step_setup_method()
-                return await self.async_step_model()
+                    return cast(
+                        ConfigFlowResult,
+                        await self.async_step_setup_method(),
+                    )
+                return cast(
+                    ConfigFlowResult,
+                    await self.async_step_model(),
+                )
 
             self._meter_selection = {}
             if user_input[CONF_DEVICE_KIND] == DEVICE_KIND_GATEWAY:
-                return await self.async_step_gateway_setup_method()
-            return await self.async_step_family()
+                return cast(
+                    ConfigFlowResult,
+                    await self.async_step_gateway_setup_method(),
+                )
+            return cast(
+                ConfigFlowResult,
+                await self.async_step_family(),
+            )
 
         return self.async_show_form(
             step_id="user",
             data_schema=build_device_kind_schema(),
         )
 
-    async def async_step_family(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_family(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Handle the family selection step for energy meters."""
         if user_input is not None:
             self._meter_selection = {
@@ -134,21 +150,16 @@ class CreateManualFlowMixin:
 
         if user_input is not None:
             profile = get_profile(family, user_input[CONF_VARIANT])
-            configured_name = str(user_input.get(CONF_NAME, "")).strip() or profile.title
-            parsed_serial = parse_grow_serial_number(configured_name)
 
             self._meter_selection.update(
                 {
-                    CONF_NAME: configured_name,
+                    CONF_NAME: profile.title,
                     CONF_VARIANT: profile.variant,
                     CONF_SLAVE_ID: int(user_input[CONF_SLAVE_ID]),
-                    CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+                    CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
                 }
             )
-            if parsed_serial is not None:
-                self._meter_selection[CONF_SERIAL_NUMBER] = parsed_serial.serial_number
-            else:
-                self._meter_selection.pop(CONF_SERIAL_NUMBER, None)
+            self._meter_selection.pop(CONF_SERIAL_NUMBER, None)
             return await self.async_step_transport()
 
         return self.async_show_form(
@@ -169,9 +180,10 @@ class CreateManualFlowMixin:
             return await self.async_step_connection()
 
         if user_input is not None:
-            if user_input[CONF_TRANSPORT] == UNSELECTED_TRANSPORT:
-                errors["base"] = "transport_required"
-            elif TransportType(user_input[CONF_TRANSPORT]) not in supported_transports:
+            if (
+                user_input[CONF_TRANSPORT] == UNSELECTED_TRANSPORT
+                or TransportType(user_input[CONF_TRANSPORT]) not in supported_transports
+            ):
                 errors["base"] = "transport_required"
             else:
                 self._meter_selection[CONF_TRANSPORT] = user_input[CONF_TRANSPORT]
@@ -259,8 +271,10 @@ class CreateManualFlowMixin:
                     )
 
                 try:
-                    serial_number = await self._async_resolve_entry_serial_number_for_creation(
-                        validation_data
+                    serial_number = (
+                        await self._async_resolve_entry_serial_number_for_creation(
+                            validation_data
+                        )
                     )
                 except IneproBluetoothDeviceNotFound:
                     errors["base"] = "bluetooth_device_not_found"
@@ -322,35 +336,42 @@ class CreateManualFlowMixin:
                                 errors=errors,
                             )
 
+                    profile = get_profile(
+                        self._meter_selection[CONF_FAMILY],
+                        self._meter_selection[CONF_VARIANT],
+                    )
+                    configured_name = self._derived_configured_name(
+                        profile=profile,
+                        serial_number=serial_number,
+                    )
+                    scan_interval = self._default_scan_interval_for_transport(transport)
+                    self._meter_selection[CONF_NAME] = configured_name
+                    self._meter_selection[CONF_SCAN_INTERVAL] = scan_interval
+                    entry_data[CONF_NAME] = configured_name
+                    entry_data[CONF_SCAN_INTERVAL] = scan_interval
+
                     if transport in {TransportType.SERIAL, TransportType.TCP_GATEWAY}:
-                        parsed_serial = (
-                            None
-                            if serial_number is None
-                            else parse_grow_serial_number(serial_number)
-                        )
                         meter = ConfiguredMeter(
                             family=self._meter_selection[CONF_FAMILY],
-                            name=self._meter_selection[CONF_NAME],
+                            name=configured_name,
                             variant=self._meter_selection[CONF_VARIANT],
                             slave_id=int(self._meter_selection[CONF_SLAVE_ID]),
                             serial_number=serial_number,
-                            product_code=(
-                                None
-                                if parsed_serial is None
-                                else parsed_serial.product_code
+                            product_code=self._product_code_from_serial_number(
+                                serial_number
                             ),
                         )
                         if transport is TransportType.TCP_GATEWAY:
                             return await self._async_upsert_tcp_gateway_bus(
                                 connection_data,
                                 meters=(meter,),
-                                scan_interval=int(self._meter_selection[CONF_SCAN_INTERVAL]),
+                                scan_interval=scan_interval,
                             )
 
                         return await self._async_upsert_serial_bus(
                             connection_data,
                             meters=(meter,),
-                            scan_interval=int(self._meter_selection[CONF_SCAN_INTERVAL]),
+                            scan_interval=scan_interval,
                         )
 
                     entry_data = with_routes_applied(
@@ -360,7 +381,7 @@ class CreateManualFlowMixin:
                     await self.async_set_unique_id(build_unique_id(entry_data))
                     self._abort_if_unique_id_configured()
                     return self.async_create_entry(
-                        title=self._meter_selection[CONF_NAME],
+                        title=configured_name,
                         data=entry_data,
                     )
 
@@ -369,6 +390,30 @@ class CreateManualFlowMixin:
             data_schema=build_connection_schema(transport, connection_defaults),
             errors=errors,
         )
+
+    @staticmethod
+    def _default_scan_interval_for_transport(transport: TransportType) -> int:
+        """Return the internal default polling interval for a transport."""
+        if transport in {TransportType.BLUETOOTH, TransportType.BLUETOOTH_PROXY}:
+            return DEFAULT_BLUETOOTH_SCAN_INTERVAL
+        return DEFAULT_SCAN_INTERVAL
+
+    def _derived_configured_name(
+        self,
+        *,
+        profile: MeterProfile,
+        serial_number: str | None,
+    ) -> str:
+        """Return the automatically managed entry name for a new meter."""
+        configured_name = str(self._meter_selection.get(CONF_NAME, "")).strip()
+        return serial_number or configured_name or profile.title
+
+    @staticmethod
+    def _product_code_from_serial_number(serial_number: str | None) -> str | None:
+        """Return the product code embedded in one GROW serial number."""
+        if serial_number is None or len(serial_number) < 4:
+            return None
+        return serial_number[:4]
 
     def _async_finish_reconfigure_connection(
         self,

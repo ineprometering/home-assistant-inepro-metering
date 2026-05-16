@@ -1,7 +1,5 @@
 """Device-registry identity helpers for Inepro Metering."""
 
-from __future__ import annotations
-
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -51,7 +49,9 @@ def configured_meter_device_identifier(
 
 def gateway_serial_number(entry: ConfigEntry, gateway=None) -> str | None:
     """Return the best known serial number for one TCP gateway."""
-    if gateway is not None and (serial_number := normalize_serial_number(gateway.serial_number)):
+    if gateway is not None and (
+        serial_number := normalize_serial_number(gateway.serial_number)
+    ):
         return serial_number
     return configured_entry_serial(entry)
 

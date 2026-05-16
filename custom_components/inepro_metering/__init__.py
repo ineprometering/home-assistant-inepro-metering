@@ -1,7 +1,5 @@
 """The Inepro Metering integration."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,8 +9,8 @@ from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import CONF_NAME, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_ACTIVE_ROUTE,
@@ -31,16 +29,16 @@ from .coordinator import (
     IneproSerialBusCoordinator,
     build_runtime_coordinator,
 )
-from .discovery import parse_grow_serial_number
 from .device_identity import (
     configured_meter_device_identifier,
     gateway_device_identifier,
     meter_device_identifier,
 )
+from .discovery import parse_grow_serial_number
 from .entry_data import (
     ConfiguredMeter,
-    build_route_from_entry_data,
     build_meter_key,
+    build_route_from_entry_data,
     ensure_bus_meter_routes,
     get_configured_meters,
     is_bus_entry,
@@ -49,16 +47,18 @@ from .entry_data import (
 )
 from .gateway_support import entry_supports_gateway_management, gateway_display_name
 from .modbus import IneproMeteringError
-from .models import get_profile, get_profile_for_variant
+from .models import get_profile
 
 PLATFORMS: list[Platform] = [
+    Platform.BUTTON,
+    Platform.NUMBER,
+    Platform.SELECT,
     Platform.SENSOR,
     Platform.SWITCH,
-    Platform.SELECT,
-    Platform.NUMBER,
     Platform.TEXT,
-    Platform.BUTTON,
 ]
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 CONF_APPLY = "apply"
 CONF_PASSWORD = "password"
@@ -82,7 +82,7 @@ SET_WIFI_CREDENTIALS_SCHEMA = vol.Schema(
 )
 
 
-async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the Inepro Metering domain."""
     _async_register_services(hass)
     return True
@@ -163,9 +163,8 @@ def _async_update_gateway_entry_identity(
     new_data = dict(entry.data)
     new_data[CONF_SERIAL_NUMBER] = gateway.serial_number
     new_title = gateway_display_name(entry, gateway=gateway)
-    if (
-        new_title != entry.title
-        or new_data.get(CONF_SERIAL_NUMBER) != entry.data.get(CONF_SERIAL_NUMBER)
+    if new_title != entry.title or new_data.get(CONF_SERIAL_NUMBER) != entry.data.get(
+        CONF_SERIAL_NUMBER
     ):
         hass.config_entries.async_update_entry(entry, title=new_title, data=new_data)
 
@@ -192,7 +191,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     name=entry.title,
                     variant=str(entry.data[CONF_VARIANT]),
                     slave_id=int(entry.data[CONF_SLAVE_ID]),
-                    serial_number=parsed_serial.serial_number if parsed_serial else None,
+                    serial_number=parsed_serial.serial_number
+                    if parsed_serial
+                    else None,
                     product_code=parsed_serial.product_code if parsed_serial else None,
                 )
             )
@@ -232,7 +233,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         new_version = 5
 
     if new_data != entry.data or new_version != entry.version:
-        hass.config_entries.async_update_entry(entry, data=new_data, version=new_version)
+        hass.config_entries.async_update_entry(
+            entry, data=new_data, version=new_version
+        )
 
     return True
 
@@ -333,9 +336,11 @@ def _find_wifi_service_target(
     return None
 
 
-def _find_matching_meter(entry: ConfigEntry, serial_number: str) -> ConfiguredMeter | None:
+def _find_matching_meter(
+    entry: ConfigEntry, serial_number: str
+) -> ConfiguredMeter | None:
     """Return the configured meter matching a Wi-Fi service serial number."""
-    for meter in get_configured_meters(entry.data, title=entry.title):
+    for meter in get_configured_meters(dict(entry.data), title=entry.title):
         known_serials = {
             build_meter_key(meter),
             meter.name,
@@ -350,10 +355,13 @@ def _find_matching_meter(entry: ConfigEntry, serial_number: str) -> ConfiguredMe
 
 def _configured_device_identifiers(entry: ConfigEntry) -> set[tuple[str, str]]:
     """Return the device identifiers currently represented by one config entry."""
-    if not is_bus_entry(entry.data):
-        configured_meters = get_configured_meters(entry.data, title=entry.title)
+    if not is_bus_entry(dict(entry.data)):
+        configured_meters = get_configured_meters(
+            dict(entry.data),
+            title=entry.title,
+        )
         meter = configured_meters[0] if configured_meters else None
-        identifiers = {
+        entry_identifiers = {
             meter_device_identifier(
                 entry,
                 serial_number=(
@@ -364,11 +372,11 @@ def _configured_device_identifiers(entry: ConfigEntry) -> set[tuple[str, str]]:
             )
         }
         if entry_supports_gateway_management(entry):
-            identifiers.add(gateway_device_identifier(entry))
-        return identifiers
+            entry_identifiers.add(gateway_device_identifier(entry))
+        return entry_identifiers
 
     identifiers: set[tuple[str, str]] = set()
-    configured_meters = get_configured_meters(entry.data, title=entry.title)
+    configured_meters = get_configured_meters(dict(entry.data), title=entry.title)
     primary_meter = configured_meters[0] if configured_meters else None
     for meter in configured_meters:
         identifiers.add(

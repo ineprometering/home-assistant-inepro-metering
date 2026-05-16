@@ -1,13 +1,14 @@
 """Button platform for TCP gateway configuration actions."""
 
-from __future__ import annotations
+from inepro_metering.gateway_settings import (
+    GatewayActionDescription,
+    get_gateway_actions,
+)
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
-from inepro_metering.gateway_settings import GatewayActionDescription, get_gateway_actions
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .gateway_support import IneproGatewayEntity, entry_supports_gateway_management
 
@@ -15,7 +16,7 @@ from .gateway_support import IneproGatewayEntity, entry_supports_gateway_managem
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up TCP gateway buttons from a config entry."""
     del hass

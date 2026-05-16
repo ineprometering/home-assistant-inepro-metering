@@ -1,6 +1,11 @@
 """Home Assistant integration view of the shared Inepro Metering models."""
 
-from inepro_metering.const import FAMILY_LABELS, TRANSPORT_LABELS, MeterFamily, TransportType
+from inepro_metering.const import (
+    FAMILY_LABELS,
+    TRANSPORT_LABELS,
+    MeterFamily,
+    TransportType,
+)
 from inepro_metering.models import (
     GROW_ERROR_BIT_MESSAGES,
     MeterProfile,

@@ -3,28 +3,9 @@
 from __future__ import annotations
 
 import ipaddress
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
-import pytest
-
-from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
-from homeassistant.components.number import DOMAIN as NUMBER_DOMAIN
-from homeassistant.components.select import DOMAIN as SELECT_DOMAIN
-from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
-from homeassistant.components.text import DOMAIN as TEXT_DOMAIN
-from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import CONF_SCAN_INTERVAL, CONF_TIMEOUT
-from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers import entity_registry as er
-from pytest_homeassistant_custom_component.common import MockConfigEntry
-
-from custom_components.inepro_metering.const import (
-    CONF_FAMILY,
-    CONF_METERS,
-    CONF_SLAVE_ID,
-    CONF_TRANSPORT,
-    CONF_VARIANT,
-    DOMAIN,
-)
 from inepro_metering.commands import encode_ascii_registers
 from inepro_metering.const import MeterFamily, TransportType
 from inepro_metering.gateway_settings import (
@@ -53,6 +34,30 @@ from inepro_metering.gateway_settings import (
     decode_gateway_configuration_registers,
 )
 from inepro_metering.modbus import IneproDeviceIdentification, IneproTcpGatewayInfo
+import pytest
+
+from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
+from custom_components.inepro_metering.const import (
+    CONF_FAMILY,
+    CONF_METERS,
+    CONF_SLAVE_ID,
+    CONF_TRANSPORT,
+    CONF_VARIANT,
+    DOMAIN,
+)
+from custom_components.inepro_metering.number import IneproGatewayNumber
+from custom_components.inepro_metering.select import IneproGatewaySelect
+from custom_components.inepro_metering.text import IneproGatewayText
+from homeassistant.components.number import DOMAIN as NUMBER_DOMAIN
+from homeassistant.components.select import DOMAIN as SELECT_DOMAIN
+from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
+from homeassistant.components.text import DOMAIN as TEXT_DOMAIN
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import CONF_SCAN_INTERVAL, CONF_TIMEOUT
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
 def _encode_ipv4_words(value: str) -> tuple[int, int]:
@@ -61,7 +66,9 @@ def _encode_ipv4_words(value: str) -> tuple[int, int]:
     return ((address >> 16) & 0xFFFF, address & 0xFFFF)
 
 
-def _gateway_entity_id(hass, platform: str, entry_id: str, key: str) -> str:
+def _gateway_entity_id(
+    hass: HomeAssistant, platform: str, entry_id: str, key: str
+) -> str:
     """Resolve one gateway config entity ID from its preserved unique ID pattern."""
     entity_id = er.async_get(hass).async_get_entity_id(
         platform,
@@ -75,9 +82,10 @@ def _gateway_entity_id(hass, platform: str, entry_id: str, key: str) -> str:
 class FakeGatewayConfigModbusClient:
     """Stateful fake Modbus client for gateway configuration entity tests."""
 
-    instances: list["FakeGatewayConfigModbusClient"] = []
+    instances: list[FakeGatewayConfigModbusClient] = []
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         del config
         self._modbus_registers = [0] * 5
         self._network_registers = [0] * 32
@@ -125,14 +133,20 @@ class FakeGatewayConfigModbusClient:
             if CONFIG_MODBUS_BAUDRATE <= current_address <= CONFIG_MODBUS_DEVICEID:
                 self._set_modbus_value(current_address, value)
                 continue
-            if CONFIG_IP_HIGH <= current_address < CONFIG_IP_HIGH + len(self._network_registers):
+            if (
+                CONFIG_IP_HIGH
+                <= current_address
+                < CONFIG_IP_HIGH + len(self._network_registers)
+            ):
                 self._set_network_value(current_address, value)
 
     async def async_read_registers(self, register_type, address, count, slave_id):
+        """Return fake register values."""
         del register_type, address, slave_id
         return [0] * count
 
     async def async_read_device_identification(self, slave_id):
+        """Return fake device identification."""
         del slave_id
         return IneproDeviceIdentification(
             manufacturer_name="inepro Metering B.V.",
@@ -141,6 +155,7 @@ class FakeGatewayConfigModbusClient:
         )
 
     async def async_read_tcp_gateway_info(self):
+        """Return fake TCP gateway information."""
         return IneproTcpGatewayInfo(
             device_type_code=330,
             device_type="TCP Gateway",
@@ -152,28 +167,31 @@ class FakeGatewayConfigModbusClient:
         )
 
     async def async_read_tcp_gateway_configuration(self):
+        """Return fake TCP gateway configuration."""
         return decode_gateway_configuration_registers(
             modbus_registers=self._modbus_registers,
             network_registers=self._network_registers,
         )
 
     async def async_write_register(self, address, value, slave_id):
+        """Record a fake single-register write."""
         normalized = (int(value),)
         self.writes.append((slave_id, address, normalized, False))
         self._apply_write(address, normalized)
 
     async def async_write_registers(self, address, values, slave_id):
+        """Record a fake multiple-register write."""
         normalized = tuple(int(value) for value in values)
         self.writes.append((slave_id, address, normalized, True))
         self._apply_write(address, normalized)
 
     async def async_close(self) -> None:
-        return None
+        """Close the fake client."""
+        return
 
 
 async def test_tcp_gateway_entry_exposes_gateway_only_configuration_entities(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Gateway-backed entries should expose the confirmed gateway config surfaces."""
     FakeGatewayConfigModbusClient.instances.clear()
@@ -193,8 +211,6 @@ async def test_tcp_gateway_entry_exposes_gateway_only_configuration_entities(
     )
     entry.add_to_hass(hass)
 
-    from unittest.mock import patch
-
     with patch(
         "custom_components.inepro_metering.coordinator.IneproModbusClient",
         FakeGatewayConfigModbusClient,
@@ -203,21 +219,192 @@ async def test_tcp_gateway_entry_exposes_gateway_only_configuration_entities(
         await hass.async_block_till_done()
 
     assert entry.state is ConfigEntryState.LOADED
-    assert hass.states.get(_gateway_entity_id(hass, SWITCH_DOMAIN, entry.entry_id, "dhcp_enabled")).state == "on"
-    assert hass.states.get(_gateway_entity_id(hass, SWITCH_DOMAIN, entry.entry_id, "ntp_enabled")).state == "off"
-    assert hass.states.get(_gateway_entity_id(hass, SELECT_DOMAIN, entry.entry_id, "modbus_port")).state == "RS485"
-    assert hass.states.get(_gateway_entity_id(hass, SELECT_DOMAIN, entry.entry_id, "baudrate")).state == "9600"
-    assert hass.states.get(_gateway_entity_id(hass, SELECT_DOMAIN, entry.entry_id, "parity")).state == "EVEN"
-    assert float(hass.states.get(_gateway_entity_id(hass, NUMBER_DOMAIN, entry.entry_id, "timeout_ms")).state) == 500.0
-    assert hass.states.get(_gateway_entity_id(hass, TEXT_DOMAIN, entry.entry_id, "ip_address")).state == "192.0.2.10"
-    assert hass.states.get(_gateway_entity_id(hass, TEXT_DOMAIN, entry.entry_id, "host_name")).state == "GATEWAY-01"
-    assert hass.states.get(_gateway_entity_id(hass, TEXT_DOMAIN, entry.entry_id, "ntp_server_1")).state == "129.6.15.28"
-    assert hass.states.get(_gateway_entity_id(hass, BUTTON_DOMAIN, entry.entry_id, "apply")).state == "unknown"
+    assert (
+        hass.states.get(
+            _gateway_entity_id(hass, SWITCH_DOMAIN, entry.entry_id, "dhcp_enabled")
+        ).state
+        == "on"
+    )
+    assert (
+        hass.states.get(
+            _gateway_entity_id(hass, SWITCH_DOMAIN, entry.entry_id, "ntp_enabled")
+        ).state
+        == "off"
+    )
+    assert (
+        hass.states.get(
+            _gateway_entity_id(hass, SELECT_DOMAIN, entry.entry_id, "modbus_port")
+        ).state
+        == "RS485"
+    )
+    assert (
+        hass.states.get(
+            _gateway_entity_id(hass, SELECT_DOMAIN, entry.entry_id, "baudrate")
+        ).state
+        == "9600"
+    )
+    assert (
+        hass.states.get(
+            _gateway_entity_id(hass, SELECT_DOMAIN, entry.entry_id, "parity")
+        ).state
+        == "EVEN"
+    )
+    assert (
+        float(
+            hass.states.get(
+                _gateway_entity_id(hass, NUMBER_DOMAIN, entry.entry_id, "timeout_ms")
+            ).state
+        )
+        == 500.0
+    )
+    assert (
+        hass.states.get(
+            _gateway_entity_id(hass, TEXT_DOMAIN, entry.entry_id, "ip_address")
+        ).state
+        == "192.0.2.10"
+    )
+    assert (
+        hass.states.get(
+            _gateway_entity_id(hass, TEXT_DOMAIN, entry.entry_id, "host_name")
+        ).state
+        == "GATEWAY-01"
+    )
+    assert (
+        hass.states.get(
+            _gateway_entity_id(hass, TEXT_DOMAIN, entry.entry_id, "ntp_server_1")
+        ).state
+        == "129.6.15.28"
+    )
+    assert (
+        hass.states.get(
+            _gateway_entity_id(hass, BUTTON_DOMAIN, entry.entry_id, "apply")
+        ).state
+        == "unknown"
+    )
+
+
+async def test_gateway_text_entity_writes_normalized_value() -> None:
+    """Gateway text writes should use the normalized value for state and I/O."""
+    coordinator = SimpleNamespace(
+        data=SimpleNamespace(gateway=None, gateway_settings={}),
+        async_write_gateway_setting=AsyncMock(),
+        async_request_refresh=AsyncMock(),
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Gateway Config",
+        data={
+            CONF_FAMILY: MeterFamily.PRO.value,
+            CONF_VARIANT: "pro_380",
+            CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
+            CONF_SLAVE_ID: 1,
+            CONF_SCAN_INTERVAL: 15,
+            "host": "10.5.2.10",
+            "port": 502,
+            CONF_TIMEOUT: 3,
+        },
+    )
+    setting = SimpleNamespace(
+        key="host_name",
+        name="Host name",
+        normalize_value=lambda value: "gateway-01",
+    )
+    entity = IneproGatewayText(coordinator, entry, setting)
+    entity.async_write_ha_state = Mock()
+
+    await entity.async_set_value(" Gateway-01 ")
+
+    assert entity.native_value == "gateway-01"
+    coordinator.async_write_gateway_setting.assert_awaited_once_with(
+        setting_key="host_name",
+        value="gateway-01",
+    )
+
+
+async def test_gateway_select_entity_writes_normalized_value() -> None:
+    """Gateway selects should use normalized choices for optimistic state and writes."""
+    coordinator = SimpleNamespace(
+        data=SimpleNamespace(gateway=None, gateway_settings={}),
+        async_write_gateway_setting=AsyncMock(),
+        async_request_refresh=AsyncMock(),
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Gateway Config",
+        data={
+            CONF_FAMILY: MeterFamily.PRO.value,
+            CONF_VARIANT: "pro_380",
+            CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
+            CONF_SLAVE_ID: 1,
+            CONF_SCAN_INTERVAL: 15,
+            "host": "10.5.2.10",
+            "port": 502,
+            CONF_TIMEOUT: 3,
+        },
+    )
+    setting = SimpleNamespace(
+        key="baudrate",
+        name="Baudrate",
+        value_by_option=lambda: {"9600": 6, "19200": 7},
+        normalize_value=lambda option: "9600",
+    )
+    entity = IneproGatewaySelect(coordinator, entry, setting)
+    entity.async_write_ha_state = Mock()
+
+    await entity.async_select_option(" 9600 ")
+
+    assert entity.current_option == "9600"
+    coordinator.async_write_gateway_setting.assert_awaited_once_with(
+        setting_key="baudrate",
+        value="9600",
+    )
+
+
+async def test_gateway_number_entity_writes_normalized_value() -> None:
+    """Gateway numbers should use normalized numeric values for state and writes."""
+    coordinator = SimpleNamespace(
+        data=SimpleNamespace(gateway=None, gateway_settings={}),
+        async_write_gateway_setting=AsyncMock(),
+        async_request_refresh=AsyncMock(),
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Gateway Config",
+        data={
+            CONF_FAMILY: MeterFamily.PRO.value,
+            CONF_VARIANT: "pro_380",
+            CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
+            CONF_SLAVE_ID: 1,
+            CONF_SCAN_INTERVAL: 15,
+            "host": "10.5.2.10",
+            "port": 502,
+            CONF_TIMEOUT: 3,
+        },
+    )
+    setting = SimpleNamespace(
+        key="timeout_ms",
+        name="Timeout",
+        number_mode=None,
+        native_min_value=0,
+        native_max_value=5000,
+        native_step=1,
+        native_unit_of_measurement="ms",
+        normalize_value=lambda value: 500,
+    )
+    entity = IneproGatewayNumber(coordinator, entry, setting)
+    entity.async_write_ha_state = Mock()
+
+    await entity.async_set_native_value(499.6)
+
+    assert entity.native_value == 500.0
+    coordinator.async_write_gateway_setting.assert_awaited_once_with(
+        setting_key="timeout_ms",
+        value=500.0,
+    )
 
 
 async def test_gateway_text_entity_rejects_invalid_ipv4_before_write(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Gateway IPv4 text writes should fail before any Modbus write is attempted."""
     FakeGatewayConfigModbusClient.instances.clear()
@@ -236,8 +423,6 @@ async def test_gateway_text_entity_rejects_invalid_ipv4_before_write(
         },
     )
     entry.add_to_hass(hass)
-
-    from unittest.mock import patch
 
     with patch(
         "custom_components.inepro_metering.coordinator.IneproModbusClient",
@@ -266,8 +451,7 @@ async def test_gateway_text_entity_rejects_invalid_ipv4_before_write(
 
 
 async def test_gateway_buttons_preserve_revert_apply_store_sequence(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Gateway action buttons should route the confirmed ordered write plans."""
     FakeGatewayConfigModbusClient.instances.clear()
@@ -287,8 +471,6 @@ async def test_gateway_buttons_preserve_revert_apply_store_sequence(
     )
     entry.add_to_hass(hass)
 
-    from unittest.mock import patch
-
     with patch(
         "custom_components.inepro_metering.coordinator.IneproModbusClient",
         FakeGatewayConfigModbusClient,
@@ -299,13 +481,21 @@ async def test_gateway_buttons_preserve_revert_apply_store_sequence(
         await hass.services.async_call(
             BUTTON_DOMAIN,
             "press",
-            {"entity_id": _gateway_entity_id(hass, BUTTON_DOMAIN, entry.entry_id, "revert")},
+            {
+                "entity_id": _gateway_entity_id(
+                    hass, BUTTON_DOMAIN, entry.entry_id, "revert"
+                )
+            },
             blocking=True,
         )
         await hass.services.async_call(
             BUTTON_DOMAIN,
             "press",
-            {"entity_id": _gateway_entity_id(hass, BUTTON_DOMAIN, entry.entry_id, "apply")},
+            {
+                "entity_id": _gateway_entity_id(
+                    hass, BUTTON_DOMAIN, entry.entry_id, "apply"
+                )
+            },
             blocking=True,
         )
         await hass.services.async_call(
@@ -331,8 +521,7 @@ async def test_gateway_buttons_preserve_revert_apply_store_sequence(
 
 
 async def test_gateway_config_entities_are_created_once_for_the_gateway_device(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Gateway config entities should attach once to the gateway, not downstream meters."""
     FakeGatewayConfigModbusClient.instances.clear()
@@ -365,8 +554,6 @@ async def test_gateway_config_entities_are_created_once_for_the_gateway_device(
     )
     entry.add_to_hass(hass)
 
-    from unittest.mock import patch
-
     with patch(
         "custom_components.inepro_metering.coordinator.IneproModbusClient",
         FakeGatewayConfigModbusClient,
@@ -386,7 +573,8 @@ async def test_gateway_config_entities_are_created_once_for_the_gateway_device(
         for entity in entity_registry.entities.values()
         if entity.platform == DOMAIN
         and entity.unique_id.startswith(f"{entry.entry_id}_gateway_")
-        and entity.domain in {
+        and entity.domain
+        in {
             SWITCH_DOMAIN,
             SELECT_DOMAIN,
             NUMBER_DOMAIN,
@@ -396,4 +584,6 @@ async def test_gateway_config_entities_are_created_once_for_the_gateway_device(
     ]
 
     assert len(gateway_entity_entries) == len(GATEWAY_SETTINGS) + len(GATEWAY_ACTIONS)
-    assert {entity.device_id for entity in gateway_entity_entries} == {gateway_device.id}
+    assert {entity.device_id for entity in gateway_entity_entries} == {
+        gateway_device.id
+    }

@@ -1,19 +1,17 @@
 """Diagnostics support for Inepro Metering."""
 
-from __future__ import annotations
-
 from datetime import datetime
 from typing import Any
+
+from inepro_metering.runtime import MeterRuntimeData
 
 from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from inepro_metering.runtime import MeterRuntimeData
-
 from . import CONF_PASSWORD, CONF_SSID
 from .const import CONF_METERS, CONF_SERIAL_NUMBER, CONF_TRANSPORT
-from .coordinator import CoordinatorData, MeterCoordinatorData, SerialBusCoordinatorData
+from .coordinator import CoordinatorData, SerialBusCoordinatorData
 from .entry_data import (
     ConfiguredMeter,
     ConfiguredRoute,
@@ -161,7 +159,9 @@ def _build_runtime_diagnostics(
         }
 
     if isinstance(coordinator.data, SerialBusCoordinatorData):
-        configured_meters = get_configured_meters(config_entry.data, title=config_entry.title)
+        configured_meters = get_configured_meters(
+            dict(config_entry.data), title=config_entry.title
+        )
         return {
             "meters": [
                 _summarize_runtime_meter(

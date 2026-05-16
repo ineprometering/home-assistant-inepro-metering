@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from homeassistant.config_entries import ConfigEntryState
-from homeassistant.helpers import entity_registry as er
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from unittest.mock import patch
+
+from inepro_metering.commands import WIFI_ENABLE_ADDRESS
+from inepro_metering.const import MeterFamily, TransportType
 
 from custom_components.inepro_metering.const import (
     CONF_BAUDRATE,
@@ -21,8 +22,11 @@ from custom_components.inepro_metering.const import (
     CONF_VARIANT,
     DOMAIN,
 )
-from inepro_metering.commands import WIFI_ENABLE_ADDRESS
-from inepro_metering.const import MeterFamily, TransportType
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
+
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
 class RecordingSwitchModbusClient:
@@ -31,31 +35,36 @@ class RecordingSwitchModbusClient:
     writes: list[tuple[int, tuple[int, ...], int, bool]] = []
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         self._registers_by_slave = {
             1: {WIFI_ENABLE_ADDRESS: 1},
             157: {WIFI_ENABLE_ADDRESS: 1},
         }
 
     async def async_read_registers(self, register_type, address, count, slave_id):
+        """Return fake register values."""
         del register_type
         registers = self._registers_by_slave[slave_id]
         return [registers.get(address + offset, 0) for offset in range(count)]
 
     async def async_write_register(self, address, value, slave_id):
+        """Record a fake single-register write."""
         self.writes.append((address, (value,), slave_id, False))
         self._registers_by_slave[slave_id][address] = value
 
     async def async_write_registers(self, address, values, slave_id):
+        """Record a fake multiple-register write."""
         normalized_values = tuple(values)
         self.writes.append((address, normalized_values, slave_id, True))
         for offset, value in enumerate(normalized_values):
             self._registers_by_slave[slave_id][address + offset] = value
 
     async def async_close(self) -> None:
-        return None
+        """Close the fake client."""
+        return
 
 
-def _switch_entity_id(hass, entry_id: str) -> str:
+def _switch_entity_id(hass: HomeAssistant, entry_id: str) -> str:
     """Resolve the switch entity ID from the preserved unique ID pattern."""
     entity_id = er.async_get(hass).async_get_entity_id(
         "switch",
@@ -67,8 +76,7 @@ def _switch_entity_id(hass, entry_id: str) -> str:
 
 
 async def test_single_meter_wifi_switch_uses_shared_write_setting_model(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The HA switch wrapper should delegate write behavior to the shared setting model."""
     RecordingSwitchModbusClient.writes = []
@@ -91,8 +99,6 @@ async def test_single_meter_wifi_switch_uses_shared_write_setting_model(
     )
     entry.add_to_hass(hass)
 
-    from unittest.mock import patch
-
     with patch(
         "custom_components.inepro_metering.coordinator.IneproModbusClient",
         RecordingSwitchModbusClient,
@@ -112,15 +118,12 @@ async def test_single_meter_wifi_switch_uses_shared_write_setting_model(
         await hass.async_block_till_done()
 
     assert entry.state is ConfigEntryState.LOADED
-    assert RecordingSwitchModbusClient.writes == [
-        (WIFI_ENABLE_ADDRESS, (0,), 1, False)
-    ]
+    assert RecordingSwitchModbusClient.writes == [(WIFI_ENABLE_ADDRESS, (0,), 1, False)]
     assert hass.states.get(_switch_entity_id(hass, entry.entry_id)).state == "off"
 
 
 async def test_serial_bus_wifi_switch_writes_to_selected_slave(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A serial-bus switch should keep HA thin and target the shared library write route."""
     RecordingSwitchModbusClient.writes = []
@@ -139,10 +142,10 @@ async def test_serial_bus_wifi_switch_writes_to_selected_slave(
             CONF_TIMEOUT: 3,
             CONF_METERS: [
                 {
-                    "name": "075625100001",
+                    "name": "075625480002",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "075625100001",
+                    "serial_number": "075625480002",
                     "product_code": "0756",
                 }
             ],
@@ -150,8 +153,6 @@ async def test_serial_bus_wifi_switch_writes_to_selected_slave(
         version=3,
     )
     entry.add_to_hass(hass)
-
-    from unittest.mock import patch
 
     with patch(
         "custom_components.inepro_metering.coordinator.IneproModbusClient",

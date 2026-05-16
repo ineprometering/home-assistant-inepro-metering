@@ -1,27 +1,24 @@
 """Coordinator for Inepro Metering polling."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import logging
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_SCAN_INTERVAL
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.util import dt as dt_util
-
-from inepro_metering.commands import async_apply_register_writes, build_wifi_credential_writes
+from inepro_metering.commands import (
+    async_apply_register_writes,
+    build_wifi_credential_writes,
+)
 from inepro_metering.gateway_settings import (
     GATEWAY_MANAGEMENT_SLAVE_ID,
+    GatewayConfiguration,
     GatewaySettingState,
     build_gateway_setting_states,
     get_gateway_action,
     get_gateway_setting,
     supports_gateway_management,
 )
+from inepro_metering.modbus import IneproTcpGatewayInfo
 from inepro_metering.reading import build_register_blocks, decode_sensor_value
 from inepro_metering.runtime import (
     MeterGatewayInfo,
@@ -31,6 +28,13 @@ from inepro_metering.runtime import (
 )
 from inepro_metering.settings import WIFI_SUPPORT_SETTING_KEY, get_writable_setting
 
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_SCAN_INTERVAL
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
+
+from .bluetooth import async_entry_data_with_ha_ble_device
 from .const import (
     CONF_FAMILY,
     CONF_SLAVE_ID,
@@ -39,19 +43,44 @@ from .const import (
     DOMAIN,
     TransportType,
 )
-from .bluetooth import async_entry_data_with_ha_ble_device
 from .entry_data import (
     ConfiguredMeter,
     build_meter_key,
     get_configured_meters,
     is_bus_entry,
-    is_serial_bus_entry,
 )
 from .modbus import IneproMeteringError, IneproModbusClient
-from .models import MeterProfile, MeterSensorDescription, get_profile, get_profile_for_variant
+from .models import (
+    MeterProfile,
+    MeterSensorDescription,
+    get_profile,
+    get_profile_for_variant,
+)
 
 _LOGGER = logging.getLogger(__name__)
 BLE_STALE_READ_GRACE_POLLS = 3
+_UNSUPPORTED_DEVICE_IDENTIFICATION_SLAVES = (
+    "_inepro_unsupported_device_identification_slaves"
+)
+
+
+def _get_unsupported_device_identification_slaves(
+    client: IneproModbusClient,
+) -> set[int]:
+    """Return cached slaves that do not support device identification."""
+    return getattr(client, _UNSUPPORTED_DEVICE_IDENTIFICATION_SLAVES, set())
+
+
+def _set_unsupported_device_identification_slaves(
+    client: IneproModbusClient,
+    unsupported_slaves: set[int],
+) -> None:
+    """Cache slaves that do not support device identification."""
+    object.__setattr__(
+        client,
+        _UNSUPPORTED_DEVICE_IDENTIFICATION_SLAVES,
+        unsupported_slaves,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +149,9 @@ class IneproMeteringCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self.entry = entry
         self.profile = get_profile(entry.data[CONF_FAMILY], entry.data[CONF_VARIANT])
         self._transport = TransportType(entry.data[CONF_TRANSPORT])
-        self._client = IneproModbusClient(_build_runtime_client_config(hass, entry.data))
+        self._client = IneproModbusClient(
+            _build_runtime_client_config(hass, dict(entry.data))
+        )
         self._last_data: CoordinatorData | None = None
         self._last_gateway: MeterGatewayInfo | None = None
         self._last_gateway_settings: dict[str, GatewaySettingState] = {}
@@ -142,9 +173,11 @@ class IneproMeteringCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._client,
                 self._transport,
             )
-            gateway_configuration = await _async_read_gateway_configuration_if_supported(
-                self._client,
-                self._transport,
+            gateway_configuration = (
+                await _async_read_gateway_configuration_if_supported(
+                    self._client,
+                    self._transport,
+                )
             )
             gateway_readings: dict[str, str | int | float] = {}
             if gateway_info is not None:
@@ -177,16 +210,6 @@ class IneproMeteringCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 gateway_settings = build_gateway_setting_states(
                     gateway_configuration.as_readings()
                 )
-            coordinator_data = CoordinatorData(
-                meter=meter_runtime,
-                gateway=gateway,
-                gateway_settings=gateway_settings,
-            )
-            self._last_data = coordinator_data
-            self._last_gateway = gateway
-            self._last_gateway_settings = gateway_settings
-            self._consecutive_failures = 0
-            return coordinator_data
         except Exception as err:
             if _should_keep_ble_stale_data(
                 self._transport,
@@ -210,6 +233,17 @@ class IneproMeteringCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 else "Unexpected Modbus read failure"
             )
             raise UpdateFailed(message) from err
+        else:
+            coordinator_data = CoordinatorData(
+                meter=meter_runtime,
+                gateway=gateway,
+                gateway_settings=gateway_settings,
+            )
+            self._last_data = coordinator_data
+            self._last_gateway = gateway
+            self._last_gateway_settings = gateway_settings
+            self._consecutive_failures = 0
+            return coordinator_data
 
     async def async_shutdown(self) -> None:
         """Close transport resources."""
@@ -287,8 +321,10 @@ class IneproSerialBusCoordinator(DataUpdateCoordinator[SerialBusCoordinatorData]
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the serial bus coordinator."""
         self.entry = entry
-        self._client = IneproModbusClient(_build_runtime_client_config(hass, entry.data))
-        self._meters = get_configured_meters(entry.data, title=entry.title)
+        self._client = IneproModbusClient(
+            _build_runtime_client_config(hass, dict(entry.data))
+        )
+        self._meters = get_configured_meters(dict(entry.data), title=entry.title)
         self._profiles = {
             build_meter_key(meter): get_profile_for_variant(meter.variant)
             for meter in self._meters
@@ -378,8 +414,12 @@ class IneproSerialBusCoordinator(DataUpdateCoordinator[SerialBusCoordinatorData]
                 )
             )
 
-        if self._meters and successful_reads == 0 and not any(
-            meter_data.readings for meter_data in self._last_meter_data.values()
+        if (
+            self._meters
+            and successful_reads == 0
+            and not any(
+                meter_data.readings for meter_data in self._last_meter_data.values()
+            )
         ):
             raise UpdateFailed("No configured meters responded on the serial bus")
 
@@ -425,7 +465,9 @@ class IneproSerialBusCoordinator(DataUpdateCoordinator[SerialBusCoordinatorData]
 
     async def async_set_wifi_enabled(self, *, slave_id: int, enabled: bool) -> None:
         """Enable or disable GROW Wi-Fi support through this serial bus connection."""
-        meter = next(configured for configured in self._meters if configured.slave_id == slave_id)
+        meter = next(
+            configured for configured in self._meters if configured.slave_id == slave_id
+        )
         await self.async_write_setting(
             profile=self.get_profile_for_meter(meter),
             slave_id=slave_id,
@@ -476,7 +518,7 @@ def build_runtime_coordinator(
     entry: ConfigEntry,
 ) -> IneproMeteringCoordinator | IneproSerialBusCoordinator:
     """Build the runtime coordinator matching the entry shape."""
-    if is_bus_entry(entry.data):
+    if is_bus_entry(dict(entry.data)):
         return IneproSerialBusCoordinator(hass, entry)
     return IneproMeteringCoordinator(hass, entry)
 
@@ -542,11 +584,7 @@ async def _async_read_profile(
     if successful_blocks == 0 and last_error is not None:
         raise last_error
 
-    unsupported_slaves = getattr(
-        client,
-        "_inepro_unsupported_device_identification_slaves",
-        set(),
-    )
+    unsupported_slaves = _get_unsupported_device_identification_slaves(client)
     if slave_id not in unsupported_slaves:
         try:
             # Device-identification data is transport-derived metadata layered onto
@@ -557,18 +595,10 @@ async def _async_read_profile(
             )
         except AttributeError:
             unsupported_slaves.add(slave_id)
-            setattr(
-                client,
-                "_inepro_unsupported_device_identification_slaves",
-                unsupported_slaves,
-            )
+            _set_unsupported_device_identification_slaves(client, unsupported_slaves)
         except IneproMeteringError as err:
             unsupported_slaves.add(slave_id)
-            setattr(
-                client,
-                "_inepro_unsupported_device_identification_slaves",
-                unsupported_slaves,
-            )
+            _set_unsupported_device_identification_slaves(client, unsupported_slaves)
             _LOGGER.debug(
                 "Modbus device-identification read disabled for slave %s: %s",
                 slave_id,
@@ -581,7 +611,7 @@ async def _async_read_profile(
 async def _async_read_gateway_metadata_if_supported(
     client: IneproModbusClient,
     transport: TransportType,
-) -> dict[str, str | int] | None:
+) -> IneproTcpGatewayInfo | None:
     """Read vendor-specific TCP gateway metadata for gateway-backed routes."""
     if not supports_gateway_management(transport):
         return None
@@ -598,7 +628,7 @@ async def _async_read_gateway_metadata_if_supported(
 async def _async_read_gateway_configuration_if_supported(
     client: IneproModbusClient,
     transport: TransportType,
-):
+) -> GatewayConfiguration | None:
     """Read shared-library TCP gateway configuration for gateway-backed routes."""
     if not supports_gateway_management(transport):
         return None

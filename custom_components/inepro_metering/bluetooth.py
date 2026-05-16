@@ -1,27 +1,26 @@
 """Home Assistant Bluetooth discovery helpers for Inepro Metering."""
 
-from __future__ import annotations
-
 import logging
 from typing import Any
+
+from inepro_metering.ble import async_read_ble_device_information_only
 
 from homeassistant.components import bluetooth as ha_bluetooth
 from homeassistant.const import CONF_TIMEOUT
 from homeassistant.core import HomeAssistant
-from inepro_metering.ble import async_read_ble_device_information_only
 
-from .discovery import (
-    DiscoveredGrowBluetoothMeter,
-    async_discover_grow_bluetooth_proxy_meters,
-    infer_grow_variant,
-    parse_grow_bluetooth_name,
-)
 from .const import (
     CONF_BLUETOOTH_ADDRESS,
     CONF_BLUETOOTH_NAME,
     CONF_TRANSPORT,
     DEFAULT_BLUETOOTH_TIMEOUT,
     TransportType,
+)
+from .discovery import (
+    DiscoveredGrowBluetoothMeter,
+    async_discover_grow_bluetooth_proxy_meters,
+    infer_grow_variant,
+    parse_grow_bluetooth_name,
 )
 from .modbus import (
     BLUETOOTH_PAIRING_MODE_NEVER,
@@ -37,12 +36,12 @@ _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "DiscoveredGrowBluetoothMeter",
+    "IneproBluetoothDeviceNotFound",
     "async_discover_grow_bluetooth_meters",
+    "async_discover_grow_bluetooth_proxy_meters",
     "async_entry_data_with_ha_ble_device",
     "async_read_bluetooth_device_information",
-    "async_discover_grow_bluetooth_proxy_meters",
     "grow_bluetooth_meter_from_service_info",
-    "IneproBluetoothDeviceNotFound",
 ]
 
 

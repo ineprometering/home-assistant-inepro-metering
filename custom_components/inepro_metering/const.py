@@ -1,20 +1,29 @@
 """Constants for the inepro Metering integration."""
 
-from __future__ import annotations
-
-from homeassistant.const import CONF_SCAN_INTERVAL, CONF_TIMEOUT
-
 from inepro_metering.const import (
     DEFAULT_BLUETOOTH_PAIRING_TIMEOUT,
     DEFAULT_BLUETOOTH_PROXY_HOST,
     DEFAULT_BLUETOOTH_PROXY_PORT,
-    DEFAULT_BLUETOOTH_TIMEOUT,
     FAMILY_LABELS,
     TRANSPORT_LABELS,
     MeterFamily,
     TransportType,
 )
 from inepro_metering.routes import ROUTE_PURPOSE_ACTIVE, ROUTE_PURPOSE_ONBOARDING
+
+from homeassistant.const import CONF_SCAN_INTERVAL, CONF_TIMEOUT
+
+__all__ = [
+    "CONF_SCAN_INTERVAL",
+    "CONF_TIMEOUT",
+    "DEFAULT_BLUETOOTH_PAIRING_TIMEOUT",
+    "FAMILY_LABELS",
+    "ROUTE_PURPOSE_ACTIVE",
+    "ROUTE_PURPOSE_ONBOARDING",
+    "TRANSPORT_LABELS",
+    "MeterFamily",
+    "TransportType",
+]
 
 DOMAIN = "inepro_metering"
 NAME = "inepro Metering"

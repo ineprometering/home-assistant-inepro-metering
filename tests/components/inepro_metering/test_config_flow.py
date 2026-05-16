@@ -2,28 +2,43 @@
 
 from __future__ import annotations
 
+import importlib
 from ipaddress import ip_address
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, PropertyMock, patch
 
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from inepro_metering.const import MeterFamily, TransportType
+import pytest
 
-from homeassistant.components.zeroconf import ZeroconfServiceInfo
-from homeassistant.config_entries import (
-    ConfigEntryState,
-    SOURCE_RECONFIGURE,
-    SOURCE_USER,
-    SOURCE_ZEROCONF,
+from custom_components.inepro_metering import async_migrate_entry
+from custom_components.inepro_metering.bluetooth import (
+    DiscoveredGrowBluetoothMeter,
 )
-from homeassistant.const import (
-    CONF_HOST,
-    CONF_NAME,
-    CONF_PORT,
-    CONF_SCAN_INTERVAL,
-    CONF_TIMEOUT,
+import custom_components.inepro_metering.config_flow as config_flow_module
+from custom_components.inepro_metering.config_flow import (
+    CONF_DISCOVERED_BLUETOOTH_METER,
+    CONF_SELECTED_METER,
+    CONF_SELECTED_ROUTE,
+    IneproIdentityError,
+    _async_validate_entry_identity,
 )
-from homeassistant.data_entry_flow import FlowResultType
-
+from custom_components.inepro_metering.config_flow_schemas import (
+    UNSELECTED_TRANSPORT,
+    build_add_route_bluetooth_discovered_schema,
+    build_add_route_connection_schema,
+    build_bluetooth_confirm_schema,
+    build_bluetooth_discovered_schema,
+    build_connection_schema,
+    build_gateway_scan_schema,
+    build_update_connection_schema,
+)
+from custom_components.inepro_metering.config_flow_shared import (
+    CONF_BLUETOOTH_PAIRING_PIN,
+    CONF_RESET_BLUETOOTH_PAIRING,
+    bluetooth_setup_identity_error_reason,
+    bluetooth_validation_error_reason,
+)
 from custom_components.inepro_metering.const import (
     CONF_ACTIVE_ROUTE,
     CONF_BAUDRATE,
@@ -36,9 +51,9 @@ from custom_components.inepro_metering.const import (
     CONF_GATEWAY_DISCOVERY_TARGET,
     CONF_GATEWAY_SETUP_METHOD,
     CONF_METERS,
-    CONF_ROUTES,
-    CONF_ROUTE_PURPOSE,
     CONF_PARITY,
+    CONF_ROUTE_PURPOSE,
+    CONF_ROUTES,
     CONF_SERIAL_NUMBER,
     CONF_SERIAL_PORT,
     CONF_SETUP_METHOD,
@@ -47,10 +62,10 @@ from custom_components.inepro_metering.const import (
     CONF_TRANSPORT,
     CONF_VARIANT,
     DEFAULT_BAUDRATE,
-    DEFAULT_BLUETOOTH_SCAN_INTERVAL,
-    DEFAULT_BLUETOOTH_TIMEOUT,
     DEFAULT_BLE_PROXY_HOST,
     DEFAULT_BLE_PROXY_PORT,
+    DEFAULT_BLUETOOTH_SCAN_INTERVAL,
+    DEFAULT_BLUETOOTH_TIMEOUT,
     DEFAULT_BYTESIZE,
     DEFAULT_GATEWAY_SCAN_SLAVE_ID_END,
     DEFAULT_PARITY,
@@ -59,7 +74,6 @@ from custom_components.inepro_metering.const import (
     DEFAULT_STOPBITS,
     DEFAULT_TIMEOUT,
     DEVICE_KIND_GATEWAY,
-    DEVICE_KIND_METER,
     DOMAIN,
     GATEWAY_SETUP_METHOD_MANUAL_IP,
     GATEWAY_SETUP_METHOD_SCAN_NETWORK,
@@ -70,10 +84,13 @@ from custom_components.inepro_metering.const import (
     SETUP_METHOD_SCAN_SERIAL,
     SETUP_METHOD_SCAN_TCP_GATEWAY,
 )
-from custom_components.inepro_metering.bluetooth import DiscoveredGrowBluetoothMeter
 from custom_components.inepro_metering.discovery import (
     DiscoveredGrowMeter,
     DiscoveredTcpGateway,
+)
+from custom_components.inepro_metering.entry_data import (
+    build_route_key,
+    get_configured_routes,
 )
 from custom_components.inepro_metering.modbus import (
     BLUETOOTH_PAIRING_MODE_NEVER,
@@ -83,40 +100,69 @@ from custom_components.inepro_metering.modbus import (
     IneproBluetoothNotPairedError,
     IneproConnectionError,
 )
-from custom_components.inepro_metering import async_migrate_entry
-from custom_components.inepro_metering.config_flow import (
-    CONF_DISCOVERED_BLUETOOTH_METER,
-    CONF_SELECTED_METER,
-    CONF_SELECTED_ROUTE,
-    IneproIdentityError,
-    _async_validate_entry_identity,
+from custom_components.inepro_metering.models import RegisterType, get_profile
+from homeassistant.config_entries import (
+    SOURCE_RECONFIGURE,
+    SOURCE_USER,
+    SOURCE_ZEROCONF,
+    ConfigEntryState,
 )
-from custom_components.inepro_metering.config_flow_shared import (
-    CONF_BLUETOOTH_PAIRING_PIN,
-    CONF_RESET_BLUETOOTH_PAIRING,
-    bluetooth_setup_identity_error_reason,
-    bluetooth_validation_error_reason,
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_NAME,
+    CONF_PORT,
+    CONF_SCAN_INTERVAL,
+    CONF_TIMEOUT,
 )
-from custom_components.inepro_metering.config_flow_schemas import (
-    UNSELECTED_TRANSPORT,
-    build_add_route_bluetooth_discovered_schema,
-    build_add_route_connection_schema,
-    build_bluetooth_confirm_schema,
-    build_bluetooth_discovered_schema,
-    build_connection_schema,
-    build_gateway_scan_schema,
-    build_update_connection_schema,
-)
-from custom_components.inepro_metering.entry_data import build_route_key, get_configured_routes
-from custom_components.inepro_metering.models import RegisterType
-from inepro_metering.const import MeterFamily, TransportType
+from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
+
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+EDIT_SERIAL_BUS_DYNAMIC_CONFIG_FIELD_TRANSLATIONS = [
+    "component.inepro_metering.config.step.edit_serial_bus.data.Modbus ID for 080125260007",
+    "component.inepro_metering.config.step.edit_serial_bus.data.Modbus ID for 085125250008",
+    "component.inepro_metering.config.step.edit_serial_bus.data_description.Modbus ID for 080125260007",
+    "component.inepro_metering.config.step.edit_serial_bus.data_description.Modbus ID for 085125250008",
+]
+EDIT_SERIAL_BUS_DYNAMIC_OPTIONS_FIELD_TRANSLATIONS = [
+    "component.inepro_metering.options.step.edit_serial_bus.data.Modbus ID for 080125260007",
+    "component.inepro_metering.options.step.edit_serial_bus.data.Modbus ID for 085125250008",
+    "component.inepro_metering.options.step.edit_serial_bus.data_description.Modbus ID for 080125260007",
+    "component.inepro_metering.options.step.edit_serial_bus.data_description.Modbus ID for 085125250008",
+]
+
+
+def _raise_identity_error_from(cause: BaseException) -> None:
+    """Raise an identity error from the supplied cause."""
+    raise IneproConnectionError("Failed to validate meter identity") from cause
+
+
+@pytest.fixture(autouse=True)
+def mock_config_flow_entry_setup(request: pytest.FixtureRequest):
+    """Avoid real transport setup for entries created by config flows."""
+    if "real_entry_setup" in request.fixturenames:
+        yield
+        return
+
+    with patch(
+        "custom_components.inepro_metering.async_setup_entry",
+        new=AsyncMock(return_value=True),
+    ):
+        yield
+
+
+@pytest.fixture
+def real_entry_setup() -> None:
+    """Allow a test to exercise the integration setup path."""
 
 
 def test_bluetooth_validation_error_reason_maps_encryption_trigger() -> None:
     """Raw encrypted-write backend errors should ask for host-level pairing."""
     try:
-        raise IneproConnectionError("Failed to validate meter identity") from RuntimeError(
-            "GATT Protocol Error: Insufficient Encryption"
+        _raise_identity_error_from(
+            RuntimeError("GATT Protocol Error: Insufficient Encryption")
         )
     except IneproConnectionError as err:
         reason = bluetooth_validation_error_reason(err, TransportType.BLUETOOTH)
@@ -127,8 +173,10 @@ def test_bluetooth_validation_error_reason_maps_encryption_trigger() -> None:
 def test_bluetooth_validation_error_reason_maps_ble_modbus_timeout() -> None:
     """Silent encrypted-write timeouts should ask for host-level pairing."""
     try:
-        raise IneproConnectionError("Failed to validate meter identity") from TimeoutError(
-            "Timed out waiting for BLE Modbus response from IM-075625100001"
+        _raise_identity_error_from(
+            TimeoutError(
+                "Timed out waiting for BLE Modbus response from IM-075625480002"
+            )
         )
     except IneproConnectionError as err:
         reason = bluetooth_validation_error_reason(err, TransportType.BLUETOOTH)
@@ -145,6 +193,273 @@ def test_bluetooth_validation_error_reason_keeps_generic_failure_unclassified() 
     )
     assert bluetooth_setup_identity_error_reason(err, TransportType.BLUETOOTH) == (
         "bluetooth_not_paired"
+    )
+
+
+async def test_config_flow_wrapper_paths_are_runtime_covered(
+    hass: HomeAssistant,
+) -> None:
+    """Exercise wrapper helpers in the runtime-imported config flow module."""
+    reloaded_module = importlib.reload(config_flow_module)
+
+    def _wrap_entry_data(
+        _hass: HomeAssistant,
+        entry_data: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return {**entry_data, "_runtime_only": True, **kwargs}
+
+    flow = reloaded_module.IneproMeteringConfigFlow()
+    flow.hass = hass
+
+    entry_data = {CONF_TRANSPORT: TransportType.BLUETOOTH.value}
+    with (
+        patch.object(
+            reloaded_module,
+            "shared_read_detected_serial",
+            new=AsyncMock(return_value="075625480002"),
+        ) as shared_read_detected_serial,
+        patch.object(
+            reloaded_module,
+            "async_entry_data_with_ha_ble_device",
+            side_effect=_wrap_entry_data,
+        ) as entry_data_with_ble,
+        patch.object(
+            reloaded_module,
+            "async_validate_modbus_config",
+            new=AsyncMock(),
+        ) as validate_modbus_config,
+        patch.object(
+            reloaded_module,
+            "async_validate_bluetooth_gatt_identity",
+            new=AsyncMock(return_value="075625480002"),
+        ) as validate_bluetooth_gatt_identity,
+        patch.object(
+            reloaded_module,
+            "_async_resolve_entry_serial_number_for_creation",
+            new=AsyncMock(return_value="075625480002"),
+        ) as resolve_serial_for_creation,
+        patch.object(
+            reloaded_module,
+            "_async_validate_entry_identity",
+            new=AsyncMock(),
+        ) as validate_entry_identity,
+        patch.object(
+            reloaded_module,
+            "async_discover_grow_serial_bus",
+            new=AsyncMock(return_value=()),
+        ) as discover_serial_bus,
+        patch.object(
+            reloaded_module,
+            "async_discover_grow_tcp_gateway",
+            new=AsyncMock(return_value=()),
+        ) as discover_tcp_gateway,
+        patch.object(
+            reloaded_module,
+            "async_discover_tcp_gateways",
+            new=AsyncMock(return_value=()),
+        ) as discover_tcp_gateways,
+        patch.object(
+            reloaded_module,
+            "async_discover_grow_bluetooth_proxy_meters",
+            new=AsyncMock(return_value=()),
+        ) as discover_bluetooth_proxy_meters,
+        patch.object(
+            reloaded_module,
+            "async_discover_grow_bluetooth_meters",
+            return_value=(),
+        ) as discover_bluetooth_meters,
+        patch.object(
+            reloaded_module,
+            "grow_bluetooth_meter_from_service_info",
+            return_value="meter",
+        ) as bluetooth_meter_from_service_info,
+    ):
+        assert (
+            await reloaded_module._async_read_detected_grow_serial(
+                entry_data,
+                product_code="0756",
+            )
+            == "075625480002"
+        )
+        shared_read_detected_serial.assert_awaited_once()
+
+        await flow._async_validate_modbus_config(entry_data)
+        validate_modbus_config.assert_awaited_once()
+
+        assert (
+            await flow._async_validate_bluetooth_gatt_identity(entry_data)
+            == "075625480002"
+        )
+        validate_bluetooth_gatt_identity.assert_awaited_once()
+
+        assert (
+            await flow._async_resolve_entry_serial_number_for_creation(entry_data)
+            == "075625480002"
+        )
+        resolve_serial_for_creation.assert_awaited_once()
+
+        await flow._async_validate_entry_identity(entry_data)
+        validate_entry_identity.assert_awaited_once()
+
+        assert (
+            await flow._async_discover_grow_serial_bus(
+                {},
+                slave_id_start=1,
+                slave_id_end=2,
+            )
+            == ()
+        )
+        discover_serial_bus.assert_awaited_once()
+
+        assert (
+            await flow._async_discover_grow_tcp_gateway(
+                {},
+                slave_id_start=1,
+                slave_id_end=2,
+            )
+            == ()
+        )
+        discover_tcp_gateway.assert_awaited_once()
+
+        assert (
+            await flow._async_discover_tcp_gateways(scan_target="192.168.1.0/24") == ()
+        )
+        discover_tcp_gateways.assert_awaited_once()
+
+        assert flow._async_discover_grow_bluetooth_meters() == ()
+        discover_bluetooth_meters.assert_called_once_with(hass)
+
+        assert await flow._async_discover_grow_bluetooth_proxy_meters() == ()
+        discover_bluetooth_proxy_meters.assert_awaited_once()
+
+        assert flow._grow_bluetooth_meter_from_service_info(object()) == "meter"
+        bluetooth_meter_from_service_info.assert_called_once()
+        assert entry_data_with_ble.call_count >= 3
+
+    config_entry = MockConfigEntry(domain=DOMAIN, data={})
+    options_flow = reloaded_module.IneproMeteringConfigFlow.async_get_options_flow(
+        config_entry
+    )
+    assert isinstance(options_flow, reloaded_module.IneproMeteringOptionsFlow)
+    assert options_flow._config_entry is config_entry
+    assert options_flow._discovered_bluetooth_devices == ()
+
+    bus_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Main RS485 Bus",
+        unique_id="bus-entry",
+        data={
+            CONF_TRANSPORT: TransportType.SERIAL.value,
+            CONF_TIMEOUT: DEFAULT_TIMEOUT,
+            CONF_METERS: [],
+        },
+    )
+    with (
+        patch.object(flow, "_get_reconfigure_entry", return_value=bus_entry),
+        patch.object(flow, "async_set_unique_id", new=AsyncMock()) as set_unique_id,
+        patch.object(flow, "_abort_if_unique_id_mismatch") as abort_if_mismatch,
+        patch.object(
+            flow,
+            "async_step_edit_serial_bus",
+            new=AsyncMock(
+                return_value={
+                    "type": FlowResultType.FORM,
+                    "step_id": "edit_serial_bus",
+                }
+            ),
+        ) as edit_serial_bus,
+    ):
+        result = await flow.async_step_reconfigure()
+
+    assert result["step_id"] == "edit_serial_bus"
+    set_unique_id.assert_awaited_once_with("bus-entry")
+    abort_if_mismatch.assert_called_once()
+    edit_serial_bus.assert_awaited_once()
+
+    single_entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="075625480002",
+        unique_id="single-entry",
+        data={
+            CONF_FAMILY: MeterFamily.GROW.value,
+            CONF_NAME: "075625480002",
+            CONF_VARIANT: "grow_750",
+            CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
+            CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+            CONF_TRANSPORT: TransportType.SERIAL.value,
+            CONF_SERIAL_NUMBER: "075625480002",
+        },
+    )
+
+    multi_transport_flow = config_flow_module.IneproMeteringConfigFlow()
+    with (
+        patch.object(
+            config_flow_module.IneproMeteringConfigFlow,
+            "_available_transports_for_current_flow",
+            new_callable=PropertyMock,
+            return_value=[TransportType.SERIAL, TransportType.TCP_GATEWAY],
+        ),
+        patch.object(
+            multi_transport_flow,
+            "_get_reconfigure_entry",
+            return_value=single_entry,
+        ),
+        patch.object(
+            multi_transport_flow,
+            "async_set_unique_id",
+            new=AsyncMock(),
+        ) as set_unique_id,
+        patch.object(multi_transport_flow, "_abort_if_unique_id_mismatch"),
+        patch.object(
+            multi_transport_flow,
+            "async_step_transport",
+            new=AsyncMock(
+                return_value={"type": FlowResultType.FORM, "step_id": "transport"}
+            ),
+        ) as step_transport,
+    ):
+        result = await multi_transport_flow.async_step_reconfigure()
+
+    assert result["step_id"] == "transport"
+    set_unique_id.assert_awaited_once_with("single-entry")
+    step_transport.assert_awaited_once()
+    assert multi_transport_flow._meter_selection[CONF_SERIAL_NUMBER] == "075625480002"
+
+    single_transport_flow = config_flow_module.IneproMeteringConfigFlow()
+    with (
+        patch.object(
+            config_flow_module.IneproMeteringConfigFlow,
+            "_available_transports_for_current_flow",
+            new_callable=PropertyMock,
+            return_value=[TransportType.BLUETOOTH],
+        ),
+        patch.object(
+            single_transport_flow,
+            "_get_reconfigure_entry",
+            return_value=single_entry,
+        ),
+        patch.object(
+            single_transport_flow,
+            "async_set_unique_id",
+            new=AsyncMock(),
+        ),
+        patch.object(single_transport_flow, "_abort_if_unique_id_mismatch"),
+        patch.object(
+            single_transport_flow,
+            "async_step_connection",
+            new=AsyncMock(
+                return_value={"type": FlowResultType.FORM, "step_id": "connection"}
+            ),
+        ) as step_connection,
+    ):
+        result = await single_transport_flow.async_step_reconfigure()
+
+    assert result["step_id"] == "connection"
+    step_connection.assert_awaited_once()
+    assert (
+        single_transport_flow._meter_selection[CONF_TRANSPORT]
+        == TransportType.BLUETOOTH.value
     )
 
 
@@ -195,9 +510,9 @@ def _expected_gateway_route(
 def _zeroconf_info(
     *,
     service_type: str = "_modbus._tcp.local.",
-    name: str = "inepro_075625100001._modbus._tcp.local.",
-    hostname: str = "inepro_075625100001.local.",
-    address: str = "192.0.2.10",
+    name: str = "inepro_075625480002._modbus._tcp.local.",
+    hostname: str = "inepro_075625480002.local.",
+    address: str = "192.168.68.76",
     port: int | None = 502,
     properties: dict[str, object] | None = None,
 ) -> ZeroconfServiceInfo:
@@ -213,7 +528,7 @@ def _zeroconf_info(
         properties=(
             {
                 "model": "879-3120",
-                "serial": "075625100001",
+                "serial": "075625480002",
                 "vendor": "WAGO GmbH & Co. KG",
             }
             if properties is None
@@ -299,7 +614,7 @@ def _schema_selector(schema, field_name: str):
     return schema.schema[_schema_field(schema, field_name)]
 
 
-async def _finish_progress(hass, result):
+async def _finish_progress(hass: HomeAssistant, result):
     """Advance a progress result to the next visible flow step."""
     assert result["type"] is FlowResultType.SHOW_PROGRESS
     await hass.async_block_till_done()
@@ -310,8 +625,7 @@ async def _finish_progress(hass, result):
 
 
 async def test_zeroconf_with_serial_and_wago_vendor_creates_tcp_meter(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A GROW mDNS service with TXT serial and WAGO vendor should be accepted."""
     result = await hass.config_entries.flow.async_init(
@@ -322,7 +636,7 @@ async def test_zeroconf_with_serial_and_wago_vendor_creates_tcp_meter(
             hostname="plant-meter.local.",
             port=1502,
             properties={
-                "serial": "075625100001",
+                "serial": "075625480002",
                 "vendor": "WAGO GmbH & Co. KG",
             },
         ),
@@ -340,12 +654,15 @@ async def test_zeroconf_with_serial_and_wago_vendor_creates_tcp_meter(
 
     validate_modbus = AsyncMock()
     validate_identity = AsyncMock()
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=validate_modbus,
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
-        new=validate_identity,
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=validate_modbus,
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+            new=validate_identity,
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -353,13 +670,13 @@ async def test_zeroconf_with_serial_and_wago_vendor_creates_tcp_meter(
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "075625100001"
-    assert result["data"][CONF_SERIAL_NUMBER] == "075625100001"
-    assert result["data"][CONF_HOST] == "192.0.2.10"
+    assert result["title"] == "075625480002"
+    assert result["data"][CONF_SERIAL_NUMBER] == "075625480002"
+    assert result["data"][CONF_HOST] == "192.168.68.76"
     assert result["data"][CONF_PORT] == 1502
     assert result["data"][CONF_TRANSPORT] == TransportType.TCP_WIFI.value
     assert result["data"][CONF_VARIANT] == "grow_750"
-    assert result["data"][CONF_ACTIVE_ROUTE] == "tcp_wifi:192.0.2.10:1502:1"
+    assert result["data"][CONF_ACTIVE_ROUTE] == "tcp_wifi:192.168.68.76:1502:1"
     validate_modbus.assert_awaited_once()
     assert (
         validate_modbus.await_args.args[0][CONF_TRANSPORT]
@@ -373,15 +690,14 @@ async def test_zeroconf_with_serial_and_wago_vendor_creates_tcp_meter(
 
 
 async def test_zeroconf_confirm_can_store_discovered_endpoint_as_ethernet(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The mDNS endpoint should keep its host/port with the selected TCP transport."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": SOURCE_ZEROCONF},
         data=_zeroconf_info(
-            address="192.0.2.10",
+            address="192.168.68.76",
             port=502,
         ),
     )
@@ -389,12 +705,15 @@ async def test_zeroconf_confirm_can_store_discovered_endpoint_as_ethernet(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "zeroconf_confirm"
 
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=AsyncMock(),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
-        new=AsyncMock(),
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=AsyncMock(),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+            new=AsyncMock(),
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -402,17 +721,18 @@ async def test_zeroconf_confirm_can_store_discovered_endpoint_as_ethernet(
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_HOST] == "192.0.2.10"
+    assert result["data"][CONF_HOST] == "192.168.68.76"
     assert result["data"][CONF_PORT] == 502
     assert result["data"][CONF_TRANSPORT] == TransportType.TCP_ETHERNET.value
-    assert result["data"][CONF_ACTIVE_ROUTE] == "tcp_ethernet:192.0.2.10:502:1"
-    route_keys = [build_route_key(route) for route in get_configured_routes(result["data"])]
-    assert route_keys == ["tcp_ethernet:192.0.2.10:502:1"]
+    assert result["data"][CONF_ACTIVE_ROUTE] == "tcp_ethernet:192.168.68.76:502:1"
+    route_keys = [
+        build_route_key(route) for route in get_configured_routes(result["data"])
+    ]
+    assert route_keys == ["tcp_ethernet:192.168.68.76:502:1"]
 
 
 async def test_zeroconf_confirm_requires_ethernet_or_wifi_selection(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A discovered Modbus TCP endpoint should not silently become Wi-Fi."""
     result = await hass.config_entries.flow.async_init(
@@ -440,8 +760,7 @@ async def test_zeroconf_confirm_requires_ethernet_or_wifi_selection(
 
 
 async def test_zeroconf_with_serial_and_known_model_accepts_custom_hostname(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Hostname branding is only a hint; TXT serial plus known model is enough."""
     result = await hass.config_entries.flow.async_init(
@@ -451,7 +770,7 @@ async def test_zeroconf_with_serial_and_known_model_accepts_custom_hostname(
             name="custom-meter._modbus._tcp.local.",
             hostname="plant-room-meter.local.",
             properties={
-                "serial": "075625100001",
+                "serial": "075625480002",
                 "model": "879-3120",
             },
         ),
@@ -462,20 +781,19 @@ async def test_zeroconf_with_serial_and_known_model_accepts_custom_hostname(
 
 
 async def test_zeroconf_uses_txt_serial_as_unique_id(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Duplicate protection should use the TXT serial, not IP or hostname."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="075625100001",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
-            CONF_NAME: "075625100001",
+            CONF_NAME: "075625480002",
             CONF_VARIANT: "grow_750",
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_TRANSPORT: TransportType.TCP_WIFI.value,
-            CONF_HOST: "192.0.2.11",
+            CONF_HOST: "192.168.68.50",
             CONF_PORT: 502,
             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
@@ -489,32 +807,31 @@ async def test_zeroconf_uses_txt_serial_as_unique_id(
         context={"source": SOURCE_ZEROCONF},
         data=_zeroconf_info(
             hostname="renamed-meter.local.",
-            address="192.0.2.10",
+            address="192.168.68.76",
             port=1502,
         ),
     )
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
-    assert entry.data[CONF_HOST] == "192.0.2.10"
+    assert entry.data[CONF_HOST] == "192.168.68.76"
     assert entry.data[CONF_PORT] == 1502
 
 
 async def test_zeroconf_duplicate_with_changed_port_updates_direct_entry(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A rediscovered direct TCP meter should refresh its endpoint before aborting."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="075625100001",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
-            CONF_NAME: "075625100001",
+            CONF_NAME: "075625480002",
             CONF_VARIANT: "grow_750",
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_TRANSPORT: TransportType.TCP_WIFI.value,
-            CONF_HOST: "192.0.2.10",
+            CONF_HOST: "192.168.68.76",
             CONF_PORT: 502,
             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
@@ -529,32 +846,31 @@ async def test_zeroconf_duplicate_with_changed_port_updates_direct_entry(
         data=_zeroconf_info(
             name="custom-grow-name._modbus._tcp.local.",
             hostname="custom-grow-name.local.",
-            address="192.0.2.12",
+            address="192.168.68.90",
             port=1502,
         ),
     )
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
-    assert entry.data[CONF_HOST] == "192.0.2.12"
+    assert entry.data[CONF_HOST] == "192.168.68.90"
     assert entry.data[CONF_PORT] == 1502
 
 
 async def test_zeroconf_rediscovery_updates_direct_route_data(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Zeroconf rediscovery should keep route data consistent with top-level data."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="075625100001",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
-            CONF_NAME: "075625100001",
+            CONF_NAME: "075625480002",
             CONF_VARIANT: "grow_750",
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_TRANSPORT: TransportType.TCP_WIFI.value,
-            CONF_HOST: "192.0.2.10",
+            CONF_HOST: "192.168.68.76",
             CONF_PORT: 502,
             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
@@ -565,7 +881,7 @@ async def test_zeroconf_rediscovery_updates_direct_route_data(
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                     CONF_TIMEOUT: DEFAULT_TIMEOUT,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.10",
+                    CONF_HOST: "192.168.68.76",
                     CONF_PORT: 502,
                 },
                 {
@@ -576,18 +892,18 @@ async def test_zeroconf_rediscovery_updates_direct_route_data(
                     CONF_HOST: DEFAULT_BLE_PROXY_HOST,
                     CONF_PORT: DEFAULT_BLE_PROXY_PORT,
                     CONF_BLUETOOTH_ADDRESS: "80:F1:B2:58:DD:5A",
-                    CONF_BLUETOOTH_NAME: "IM-075625100001",
+                    CONF_BLUETOOTH_NAME: "IM-075625480002",
                 },
                 {
                     CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                     CONF_TIMEOUT: DEFAULT_TIMEOUT,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ONBOARDING,
-                    CONF_HOST: "192.0.2.13",
+                    CONF_HOST: "192.168.68.85",
                     CONF_PORT: 502,
                 },
             ],
-            CONF_ACTIVE_ROUTE: "tcp_wifi:192.0.2.10:502:1",
+            CONF_ACTIVE_ROUTE: "tcp_wifi:192.168.68.76:502:1",
         },
     )
     entry.add_to_hass(hass)
@@ -596,39 +912,38 @@ async def test_zeroconf_rediscovery_updates_direct_route_data(
         DOMAIN,
         context={"source": SOURCE_ZEROCONF},
         data=_zeroconf_info(
-            address="192.0.2.12",
+            address="192.168.68.90",
             port=1502,
         ),
     )
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
-    assert entry.data[CONF_HOST] == "192.0.2.12"
+    assert entry.data[CONF_HOST] == "192.168.68.90"
     assert entry.data[CONF_PORT] == 1502
-    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_wifi:192.0.2.12:1502:1"
-    assert entry.data[CONF_ROUTES][0][CONF_HOST] == "192.0.2.12"
+    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_wifi:192.168.68.90:1502:1"
+    assert entry.data[CONF_ROUTES][0][CONF_HOST] == "192.168.68.90"
     assert entry.data[CONF_ROUTES][0][CONF_PORT] == 1502
     assert entry.data[CONF_ROUTES][1][CONF_HOST] == DEFAULT_BLE_PROXY_HOST
     assert entry.data[CONF_ROUTES][1][CONF_PORT] == DEFAULT_BLE_PROXY_PORT
-    assert entry.data[CONF_ROUTES][2][CONF_HOST] == "192.0.2.13"
+    assert entry.data[CONF_ROUTES][2][CONF_HOST] == "192.168.68.85"
     assert entry.data[CONF_ROUTES][2][CONF_PORT] == 502
 
 
 async def test_zeroconf_rediscovery_preserves_active_alternate_tcp_route(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Zeroconf should not revert a manually selected active TCP route."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="075625100001",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
-            CONF_NAME: "075625100001",
+            CONF_NAME: "075625480002",
             CONF_VARIANT: "grow_750",
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_TRANSPORT: TransportType.TCP_WIFI.value,
-            CONF_HOST: "192.0.2.14",
+            CONF_HOST: "192.168.68.88",
             CONF_PORT: 502,
             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
@@ -639,7 +954,7 @@ async def test_zeroconf_rediscovery_preserves_active_alternate_tcp_route(
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                     CONF_TIMEOUT: DEFAULT_TIMEOUT,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.10",
+                    CONF_HOST: "192.168.68.76",
                     CONF_PORT: 502,
                 },
                 {
@@ -647,7 +962,7 @@ async def test_zeroconf_rediscovery_preserves_active_alternate_tcp_route(
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                     CONF_TIMEOUT: DEFAULT_TIMEOUT,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.14",
+                    CONF_HOST: "192.168.68.88",
                     CONF_PORT: 502,
                 },
                 {
@@ -655,11 +970,11 @@ async def test_zeroconf_rediscovery_preserves_active_alternate_tcp_route(
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                     CONF_TIMEOUT: DEFAULT_TIMEOUT,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.10",
+                    CONF_HOST: "192.168.68.76",
                     CONF_PORT: 502,
                 },
             ],
-            CONF_ACTIVE_ROUTE: "tcp_wifi:192.0.2.14:502:1",
+            CONF_ACTIVE_ROUTE: "tcp_wifi:192.168.68.88:502:1",
         },
     )
     entry.add_to_hass(hass)
@@ -668,38 +983,37 @@ async def test_zeroconf_rediscovery_preserves_active_alternate_tcp_route(
         DOMAIN,
         context={"source": SOURCE_ZEROCONF},
         data=_zeroconf_info(
-            address="192.0.2.10",
+            address="192.168.68.76",
             port=502,
         ),
     )
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
-    assert entry.data[CONF_HOST] == "192.0.2.14"
+    assert entry.data[CONF_HOST] == "192.168.68.88"
     assert entry.data[CONF_PORT] == 502
-    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_wifi:192.0.2.14:502:1"
+    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_wifi:192.168.68.88:502:1"
     route_keys = [build_route_key(route) for route in get_configured_routes(entry.data)]
     assert route_keys == [
-        "tcp_wifi:192.0.2.10:502:1",
-        "tcp_wifi:192.0.2.14:502:1",
+        "tcp_wifi:192.168.68.76:502:1",
+        "tcp_wifi:192.168.68.88:502:1",
     ]
 
 
 async def test_zeroconf_rediscovery_collapses_direct_tcp_endpoint_conflict(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Zeroconf should not keep stale Wi-Fi/Ethernet labels for one endpoint."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="075625100001",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
-            CONF_NAME: "075625100001",
+            CONF_NAME: "075625480002",
             CONF_VARIANT: "grow_750",
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
-            CONF_HOST: "192.0.2.10",
+            CONF_HOST: "192.168.68.76",
             CONF_PORT: 502,
             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
@@ -710,7 +1024,7 @@ async def test_zeroconf_rediscovery_collapses_direct_tcp_endpoint_conflict(
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                     CONF_TIMEOUT: DEFAULT_TIMEOUT,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.10",
+                    CONF_HOST: "192.168.68.76",
                     CONF_PORT: 502,
                 },
                 {
@@ -718,11 +1032,11 @@ async def test_zeroconf_rediscovery_collapses_direct_tcp_endpoint_conflict(
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                     CONF_TIMEOUT: DEFAULT_TIMEOUT,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.10",
+                    CONF_HOST: "192.168.68.76",
                     CONF_PORT: 502,
                 },
             ],
-            CONF_ACTIVE_ROUTE: "tcp_ethernet:192.0.2.10:502:1",
+            CONF_ACTIVE_ROUTE: "tcp_ethernet:192.168.68.76:502:1",
         },
     )
     entry.add_to_hass(hass)
@@ -731,36 +1045,35 @@ async def test_zeroconf_rediscovery_collapses_direct_tcp_endpoint_conflict(
         DOMAIN,
         context={"source": SOURCE_ZEROCONF},
         data=_zeroconf_info(
-            address="192.0.2.10",
+            address="192.168.68.76",
             port=502,
         ),
     )
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
-    assert entry.data[CONF_HOST] == "192.0.2.10"
+    assert entry.data[CONF_HOST] == "192.168.68.76"
     assert entry.data[CONF_PORT] == 502
-    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_ethernet:192.0.2.10:502:1"
+    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_ethernet:192.168.68.76:502:1"
     assert [build_route_key(route) for route in get_configured_routes(entry.data)] == [
-        "tcp_ethernet:192.0.2.10:502:1",
+        "tcp_ethernet:192.168.68.76:502:1",
     ]
 
 
 async def test_zeroconf_legacy_entry_updates_host_port(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Legacy direct entries should update by stored serial even with endpoint unique_id."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="192.0.2.10:502",
+        unique_id="192.168.68.76:502",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
-            CONF_NAME: "075625100001",
+            CONF_NAME: "075625480002",
             CONF_VARIANT: "grow_750",
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_TRANSPORT: TransportType.TCP_WIFI.value,
-            CONF_HOST: "192.0.2.10",
+            CONF_HOST: "192.168.68.76",
             CONF_PORT: 502,
             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
@@ -771,11 +1084,11 @@ async def test_zeroconf_legacy_entry_updates_host_port(
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                     CONF_TIMEOUT: DEFAULT_TIMEOUT,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.10",
+                    CONF_HOST: "192.168.68.76",
                     CONF_PORT: 502,
                 }
             ],
-            CONF_ACTIVE_ROUTE: "tcp_wifi:192.0.2.10:502:1",
+            CONF_ACTIVE_ROUTE: "tcp_wifi:192.168.68.76:502:1",
         },
     )
     entry.add_to_hass(hass)
@@ -789,7 +1102,7 @@ async def test_zeroconf_legacy_entry_updates_host_port(
             DOMAIN,
             context={"source": SOURCE_ZEROCONF},
             data=_zeroconf_info(
-                address="192.0.2.12",
+                address="192.168.68.90",
                 port=1502,
             ),
         )
@@ -798,36 +1111,35 @@ async def test_zeroconf_legacy_entry_updates_host_port(
     assert result["reason"] == "already_configured"
     update_entry.assert_called_once()
     assert update_entry.call_args.args[0] is entry
-    assert entry.unique_id == "192.0.2.10:502"
-    assert entry.data[CONF_HOST] == "192.0.2.12"
+    assert entry.unique_id == "192.168.68.76:502"
+    assert entry.data[CONF_HOST] == "192.168.68.90"
     assert entry.data[CONF_PORT] == 1502
-    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_wifi:192.0.2.12:1502:1"
-    assert entry.data[CONF_ROUTES][0][CONF_HOST] == "192.0.2.12"
+    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_wifi:192.168.68.90:1502:1"
+    assert entry.data[CONF_ROUTES][0][CONF_HOST] == "192.168.68.90"
     assert entry.data[CONF_ROUTES][0][CONF_PORT] == 1502
 
 
 async def test_zeroconf_duplicate_via_gateway_does_not_update_gateway_entry(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A meter already behind a gateway should not become a direct TCP entry."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="192.0.2.13:502",
+        unique_id="192.168.68.85:502",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
-            CONF_NAME: "Inepro Gateway 000000000003",
+            CONF_NAME: "Inepro Gateway 033023260133",
             CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
-            CONF_HOST: "192.0.2.13",
+            CONF_HOST: "192.168.68.85",
             CONF_PORT: 502,
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
             CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
             CONF_METERS: [
                 {
                     CONF_FAMILY: MeterFamily.GROW.value,
-                    CONF_NAME: "075625100001",
+                    CONF_NAME: "075625480002",
                     CONF_VARIANT: "grow_750",
-                    CONF_SERIAL_NUMBER: "075625100001",
+                    CONF_SERIAL_NUMBER: "075625480002",
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                     CONF_ROUTES: [
                         {
@@ -835,11 +1147,11 @@ async def test_zeroconf_duplicate_via_gateway_does_not_update_gateway_entry(
                             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                             CONF_TIMEOUT: DEFAULT_TIMEOUT,
                             CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                            CONF_HOST: "192.0.2.13",
+                            CONF_HOST: "192.168.68.85",
                             CONF_PORT: 502,
                         }
                     ],
-                    CONF_ACTIVE_ROUTE: "tcp_gateway:192.0.2.13:502:1",
+                    CONF_ACTIVE_ROUTE: "tcp_gateway:192.168.68.85:502:1",
                 }
             ],
         },
@@ -850,21 +1162,20 @@ async def test_zeroconf_duplicate_via_gateway_does_not_update_gateway_entry(
         DOMAIN,
         context={"source": SOURCE_ZEROCONF},
         data=_zeroconf_info(
-            address="192.0.2.12",
+            address="192.168.68.90",
             port=1502,
         ),
     )
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured_via_gateway"
-    assert entry.data[CONF_HOST] == "192.0.2.13"
+    assert entry.data[CONF_HOST] == "192.168.68.85"
     assert entry.data[CONF_PORT] == 502
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
 
 
 async def test_zeroconf_rejects_modbus_service_without_serial(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """TXT serial is required even when the hostname looks like an inepro meter."""
     result = await hass.config_entries.flow.async_init(
@@ -880,8 +1191,7 @@ async def test_zeroconf_rejects_modbus_service_without_serial(
 
 
 async def test_zeroconf_rejects_modbus_service_without_ownership_hint(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A serial on an unrelated Modbus mDNS service is not enough."""
     result = await hass.config_entries.flow.async_init(
@@ -891,7 +1201,7 @@ async def test_zeroconf_rejects_modbus_service_without_ownership_hint(
             name="generic-meter._modbus._tcp.local.",
             hostname="generic-meter.local.",
             properties={
-                "serial": "075625100001",
+                "serial": "075625480002",
                 "vendor": "Other Vendor",
                 "model": "unknown",
             },
@@ -903,8 +1213,7 @@ async def test_zeroconf_rejects_modbus_service_without_ownership_hint(
 
 
 async def test_zeroconf_rejects_unrelated_service_type(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Only Modbus TCP mDNS services should enter the GROW discovery path."""
     result = await hass.config_entries.flow.async_init(
@@ -918,8 +1227,7 @@ async def test_zeroconf_rejects_unrelated_service_type(
 
 
 async def test_zeroconf_accepts_case_insensitive_txt_keys(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """TXT keys should tolerate common case differences."""
     result = await hass.config_entries.flow.async_init(
@@ -929,7 +1237,7 @@ async def test_zeroconf_accepts_case_insensitive_txt_keys(
             name="custom-meter._modbus._tcp.local.",
             hostname="custom-meter.local.",
             properties={
-                "Serial": "075625100001",
+                "Serial": "075625480002",
                 "Vendor": "WAGO GmbH & Co. KG",
             },
         ),
@@ -940,8 +1248,7 @@ async def test_zeroconf_accepts_case_insensitive_txt_keys(
 
 
 async def test_zeroconf_confirm_requires_live_identity_match(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Zeroconf setup should validate that Modbus identity matches TXT serial."""
     result = await hass.config_entries.flow.async_init(
@@ -953,12 +1260,15 @@ async def test_zeroconf_confirm_requires_live_identity_match(
     assert result["step_id"] == "zeroconf_confirm"
 
     validate_identity = AsyncMock(return_value=None)
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
-        new=validate_identity,
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+            new=validate_identity,
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -966,19 +1276,18 @@ async def test_zeroconf_confirm_requires_live_identity_match(
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_SERIAL_NUMBER] == "075625100001"
+    assert result["data"][CONF_SERIAL_NUMBER] == "075625480002"
     assert result["data"][CONF_PORT] == 1502
     validate_identity.assert_awaited_once()
     validated_data = validate_identity.await_args.args[0]
-    assert validated_data[CONF_SERIAL_NUMBER] == "075625100001"
-    assert validated_data[CONF_HOST] == "192.0.2.10"
+    assert validated_data[CONF_SERIAL_NUMBER] == "075625480002"
+    assert validated_data[CONF_HOST] == "192.168.68.76"
     assert validated_data[CONF_PORT] == 1502
     assert validated_data[CONF_TRANSPORT] == TransportType.TCP_WIFI.value
 
 
 async def test_zeroconf_confirm_rejects_live_identity_mismatch(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A TXT serial that does not match the live Modbus serial must not create an entry."""
     result = await hass.config_entries.flow.async_init(
@@ -987,12 +1296,15 @@ async def test_zeroconf_confirm_rejects_live_identity_mismatch(
         data=_zeroconf_info(),
     )
 
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
-        new=AsyncMock(side_effect=IneproIdentityError),
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+            new=AsyncMock(side_effect=IneproIdentityError),
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -1006,8 +1318,7 @@ async def test_zeroconf_confirm_rejects_live_identity_mismatch(
 
 
 async def test_zeroconf_confirm_reports_identity_read_failure(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """If the endpoint connects but serial cannot be read, keep the flow open."""
     result = await hass.config_entries.flow.async_init(
@@ -1016,12 +1327,15 @@ async def test_zeroconf_confirm_reports_identity_read_failure(
         data=_zeroconf_info(),
     )
 
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
-        new=AsyncMock(side_effect=IneproConnectionError),
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+            new=AsyncMock(side_effect=IneproConnectionError),
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -1035,8 +1349,7 @@ async def test_zeroconf_confirm_reports_identity_read_failure(
 
 
 async def test_user_flow_can_choose_gateway_before_any_meter_details(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The first config step should allow starting from a TCP gateway."""
     result = await hass.config_entries.flow.async_init(
@@ -1056,8 +1369,7 @@ async def test_user_flow_can_choose_gateway_before_any_meter_details(
 
 
 async def test_user_flow_still_accepts_legacy_family_submission(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The first step should remain tolerant of the older family-first submission."""
     result = await hass.config_entries.flow.async_init(
@@ -1075,8 +1387,7 @@ async def test_user_flow_still_accepts_legacy_family_submission(
 
 
 async def test_gateway_manual_ip_path_opens_gateway_meter_scan(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Known gateway IPs should jump straight to the downstream meter scan form."""
     result = await hass.config_entries.flow.async_init(
@@ -1098,8 +1409,7 @@ async def test_gateway_manual_ip_path_opens_gateway_meter_scan(
 
 
 async def test_gateway_network_scan_allows_explicit_target_retry(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Gateway discovery should allow retrying with one explicit IP or subnet target."""
     discovered_gateway = DiscoveredTcpGateway(
@@ -1139,8 +1449,7 @@ async def test_gateway_network_scan_allows_explicit_target_retry(
 
 
 async def test_gateway_network_scan_shows_progress(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Gateway discovery should use Home Assistant progress UI while scanning."""
     result = await hass.config_entries.flow.async_init(
@@ -1175,8 +1484,7 @@ async def test_gateway_network_scan_shows_progress(
 
 
 async def test_gateway_network_scan_no_verified_gateways_shows_retry_form(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Gateway discovery failures should return to the target form with guidance."""
     result = await hass.config_entries.flow.async_init(
@@ -1208,8 +1516,7 @@ async def test_gateway_network_scan_no_verified_gateways_shows_retry_form(
 
 
 async def test_multiple_verified_gateways_can_be_selected(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Gateway selections should include host and port for clear labels."""
     discovered_gateways = (
@@ -1262,8 +1569,7 @@ async def test_multiple_verified_gateways_can_be_selected(
 
 
 async def test_gateway_network_scan_rejects_invalid_explicit_target(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Gateway discovery should surface validation errors for malformed scan targets."""
     result = await hass.config_entries.flow.async_init(
@@ -1296,8 +1602,7 @@ async def test_gateway_network_scan_rejects_invalid_explicit_target(
 
 
 async def test_gateway_can_be_added_when_no_downstream_meters_are_found(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A validated gateway should not fail setup only because no meters were found."""
     result = await hass.config_entries.flow.async_init(
@@ -1325,14 +1630,15 @@ async def test_gateway_can_be_added_when_no_downstream_meters_are_found(
                 CONF_TIMEOUT: 3,
                 "slave_id_start": 1,
                 "slave_id_end": 8,
-                CONF_SCAN_INTERVAL: 15,
             },
         )
 
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "gateway_no_meters"
 
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], user_input={})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], user_input={}
+    )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Inepro Gateway 10.5.2.2:502"
@@ -1343,24 +1649,23 @@ async def test_gateway_can_be_added_when_no_downstream_meters_are_found(
 
 
 async def test_gateway_scan_skips_meter_already_configured_directly_by_serial(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Gateway scan must not offer a physical meter already configured directly."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
-        unique_id="075625100001",
+        title="075625480002",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_WIFI.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            CONF_HOST: "192.0.2.10",
+            CONF_HOST: "192.168.68.76",
             CONF_PORT: 502,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
         },
     )
     entry.add_to_hass(hass)
@@ -1383,7 +1688,7 @@ async def test_gateway_scan_skips_meter_already_configured_directly_by_serial(
         new=AsyncMock(
             return_value=(
                 DiscoveredGrowMeter(
-                    serial_number="075625100001",
+                    serial_number="075625480002",
                     slave_id=1,
                     variant="grow_750",
                     model_title="GROW 750",
@@ -1396,12 +1701,11 @@ async def test_gateway_scan_skips_meter_already_configured_directly_by_serial(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
-                CONF_HOST: "192.0.2.13",
+                CONF_HOST: "192.168.68.85",
                 CONF_PORT: 502,
                 CONF_TIMEOUT: 3,
                 "slave_id_start": 1,
                 "slave_id_end": 8,
-                CONF_SCAN_INTERVAL: 15,
             },
         )
 
@@ -1413,14 +1717,15 @@ def test_gateway_scan_schema_defaults_to_fast_common_range() -> None:
     """Manual gateway scans should default to a fast common downstream range."""
     schema = build_gateway_scan_schema(None)
     slave_id_end_field = next(
-        field for field in schema.schema if getattr(field, "schema", None) == "slave_id_end"
+        field
+        for field in schema.schema
+        if getattr(field, "schema", None) == "slave_id_end"
     )
     assert slave_id_end_field.default() == DEFAULT_GATEWAY_SCAN_SLAVE_ID_END
 
 
 async def test_grow_850_gateway_support_still_allows_serial_manual_flow(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """GROW 850 should expose a transport choice while still allowing serial setup."""
     assert DEFAULT_PARITY == "E"
@@ -1449,10 +1754,8 @@ async def test_grow_850_gateway_support_still_allows_serial_manual_flow(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            "name": "Lab Meter",
             CONF_VARIANT: "grow_850",
             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
-            CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
         },
     )
     assert result["type"] is FlowResultType.FORM
@@ -1465,12 +1768,15 @@ async def test_grow_850_gateway_support_still_allows_serial_manual_flow(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "connection"
 
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_read_detected_grow_serial",
-        new=AsyncMock(return_value="085125250008"),
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_read_detected_grow_serial",
+            new=AsyncMock(return_value="085125250008"),
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -1485,12 +1791,12 @@ async def test_grow_850_gateway_support_still_allows_serial_manual_flow(
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "Lab Meter"
+    assert result["title"] == "085125250008"
     assert result["data"][CONF_TRANSPORT] == TransportType.SERIAL.value
     assert result["data"][CONF_METERS] == [
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
-            name="Lab Meter",
+            name="085125250008",
             variant="grow_850",
             slave_id=DEFAULT_SLAVE_ID,
             serial_port="COM7",
@@ -1502,8 +1808,7 @@ async def test_grow_850_gateway_support_still_allows_serial_manual_flow(
 
 
 async def test_grow_701_requires_transport_selection(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Models with multiple transports should show the transport step."""
     result = await hass.config_entries.flow.async_init(
@@ -1528,10 +1833,8 @@ async def test_grow_701_requires_transport_selection(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            "name": "Main Meter",
             CONF_VARIANT: "grow_701",
             CONF_SLAVE_ID: 3,
-            CONF_SCAN_INTERVAL: 20,
         },
     )
 
@@ -1540,8 +1843,7 @@ async def test_grow_701_requires_transport_selection(
 
 
 async def test_grow_manual_flow_hides_windows_ble_proxy_transport(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Normal setup should not expose the developer-only Windows BLE proxy."""
     result = await hass.config_entries.flow.async_init(
@@ -1559,10 +1861,8 @@ async def test_grow_manual_flow_hides_windows_ble_proxy_transport(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            CONF_NAME: "BLE Proxy Meter",
             CONF_VARIANT: "grow_750",
             CONF_SLAVE_ID: 1,
-            CONF_SCAN_INTERVAL: 15,
         },
     )
 
@@ -1575,8 +1875,7 @@ async def test_grow_manual_flow_hides_windows_ble_proxy_transport(
         if getattr(field, "schema", None) == CONF_TRANSPORT
     )
     transport_options = {
-        option["value"]
-        for option in transport_selector.config["options"]
+        option["value"] for option in transport_selector.config["options"]
     }
     assert TransportType.BLUETOOTH_PROXY.value not in transport_options
     assert transport_options >= {
@@ -1589,8 +1888,7 @@ async def test_grow_manual_flow_hides_windows_ble_proxy_transport(
 
 
 async def test_transport_step_requires_explicit_selection(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The transport step should not silently default to the first option."""
     result = await hass.config_entries.flow.async_init(
@@ -1604,10 +1902,8 @@ async def test_transport_step_requires_explicit_selection(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            CONF_NAME: "PRO380 Gateway",
             CONF_VARIANT: "pro_380",
             CONF_SLAVE_ID: 1,
-            CONF_SCAN_INTERVAL: 15,
         },
     )
 
@@ -1624,12 +1920,11 @@ async def test_transport_step_requires_explicit_selection(
     assert result["errors"] == {"base": "transport_required"}
 
 
-def test_bluetooth_confirm_schema_defaults_to_slower_polling() -> None:
-    """Bluetooth-discovered meters should default to a calmer polling interval."""
+def test_bluetooth_confirm_schema_hides_polling_interval() -> None:
+    """Bluetooth-discovered meters should keep polling intervals internal."""
     schema = build_bluetooth_confirm_schema(None)
-    scan_interval_field = _schema_field(schema, CONF_SCAN_INTERVAL)
     timeout_field = _schema_field(schema, CONF_TIMEOUT)
-    assert scan_interval_field.default() == DEFAULT_BLUETOOTH_SCAN_INTERVAL
+    assert CONF_SCAN_INTERVAL not in _schema_field_names(schema)
     assert timeout_field.default() == DEFAULT_BLUETOOTH_TIMEOUT
 
 
@@ -1645,8 +1940,8 @@ def test_normal_bluetooth_schemas_do_not_offer_pin_or_reset() -> None:
     """Normal Bluetooth setup validates host-paired meters, not in-HA pairing."""
     discovered_meter = DiscoveredGrowBluetoothMeter(
         address="AA:BB:CC:DD:EE:FF",
-        bluetooth_name="IM-075625100001",
-        serial_number="075625100001",
+        bluetooth_name="IM-075625480002",
+        serial_number="075625480002",
         variant="grow_750",
         model_title="GROW 3P4S",
         product_code="0756",
@@ -1668,8 +1963,8 @@ def test_add_route_bluetooth_schema_requires_long_ble_timeout() -> None:
     """Bluetooth route setup should not allow sub-10s BLE connection timeouts."""
     discovered_meter = DiscoveredGrowBluetoothMeter(
         address="AA:BB:CC:DD:EE:FF",
-        bluetooth_name="IM-075625100001",
-        serial_number="075625100001",
+        bluetooth_name="IM-075625480002",
+        serial_number="075625480002",
         variant="grow_750",
         model_title="GROW 3P4S",
         product_code="0756",
@@ -1699,7 +1994,7 @@ def test_update_bluetooth_connection_schema_requires_long_ble_timeout() -> None:
         {
             CONF_TRANSPORT: TransportType.BLUETOOTH.value,
             CONF_BLUETOOTH_ADDRESS: "AA:BB:CC:DD:EE:FF",
-            CONF_BLUETOOTH_NAME: "IM-075625100001",
+            CONF_BLUETOOTH_NAME: "IM-075625480002",
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
         },
         None,
@@ -1712,8 +2007,7 @@ def test_update_bluetooth_connection_schema_requires_long_ble_timeout() -> None:
 
 
 async def test_pro_380_flow_includes_transport_step_and_can_use_serial(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """PRO models should expose a transport step for serial vs gateway access."""
     result = await hass.config_entries.flow.async_init(
@@ -1733,10 +2027,8 @@ async def test_pro_380_flow_includes_transport_step_and_can_use_serial(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            "name": "PRO Lab Meter",
             CONF_VARIANT: "pro_380",
             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
-            CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
         },
     )
     assert result["type"] is FlowResultType.FORM
@@ -1766,13 +2058,13 @@ async def test_pro_380_flow_includes_transport_step_and_can_use_serial(
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "PRO Lab Meter"
+    assert result["title"] == get_profile(MeterFamily.PRO.value, "pro_380").title
     assert result["data"][CONF_FAMILY] == MeterFamily.PRO.value
     assert result["data"][CONF_TRANSPORT] == TransportType.SERIAL.value
     assert result["data"][CONF_METERS] == [
         _expected_bus_meter(
             family=MeterFamily.PRO.value,
-            name="PRO Lab Meter",
+            name=get_profile(MeterFamily.PRO.value, "pro_380").title,
             variant="pro_380",
             slave_id=DEFAULT_SLAVE_ID,
             serial_port="COM9",
@@ -1782,13 +2074,12 @@ async def test_pro_380_flow_includes_transport_step_and_can_use_serial(
 
 
 async def test_grow_serial_scan_discovers_and_creates_entry(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A GROW serial bus scan should create one shared serial bus entry."""
     discovered_meters = (
         DiscoveredGrowMeter(
-            serial_number="075625100001",
+            serial_number="075625480002",
             slave_id=7,
             variant="grow_750",
             model_title="GROW 3P4S",
@@ -1841,7 +2132,6 @@ async def test_grow_serial_scan_discovers_and_creates_entry(
                 CONF_TIMEOUT: 2,
                 "slave_id_start": 1,
                 "slave_id_end": 16,
-                CONF_SCAN_INTERVAL: 15,
             },
         )
 
@@ -1851,25 +2141,24 @@ async def test_grow_serial_scan_discovers_and_creates_entry(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            "discovered_meters": ["075625100001:7", "085125250008:157"],
-            CONF_SCAN_INTERVAL: 20,
+            "discovered_meters": ["075625480002:7", "085125250008:157"],
         },
     )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "075625100001"
+    assert result["title"] == "075625480002"
     assert result["data"][CONF_TRANSPORT] == TransportType.SERIAL.value
     assert result["data"][CONF_SERIAL_PORT] == "COM5"
-    assert result["data"][CONF_SCAN_INTERVAL] == 20
+    assert result["data"][CONF_SCAN_INTERVAL] == DEFAULT_SCAN_INTERVAL
     assert result["data"][CONF_METERS] == [
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
-            name="075625100001",
+            name="075625480002",
             variant="grow_750",
             slave_id=7,
             serial_port="COM5",
             timeout=2,
-            serial_number="075625100001",
+            serial_number="075625480002",
             product_code="0756",
         ),
         _expected_bus_meter(
@@ -1886,14 +2175,13 @@ async def test_grow_serial_scan_discovers_and_creates_entry(
 
 
 async def test_grow_bluetooth_scan_discovers_and_creates_entry(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A GROW Bluetooth scan should create a single BLE-backed meter entry."""
     discovered_meter = DiscoveredGrowBluetoothMeter(
         address="AA:BB:CC:DD:EE:FF",
-        bluetooth_name="IM-075625100001",
-        serial_number="075625100001",
+        bluetooth_name="IM-075625480002",
+        serial_number="075625480002",
         variant="grow_750",
         model_title="GROW 3P4S",
         product_code="0756",
@@ -1920,40 +2208,44 @@ async def test_grow_bluetooth_scan_discovers_and_creates_entry(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "bluetooth_discovered"
 
-    ble_device = SimpleNamespace(name="IM-075625100001", address="AA:BB:CC:DD:EE:FF")
-    validate_gatt = AsyncMock(return_value="075625100001")
+    ble_device = SimpleNamespace(name="IM-075625480002", address="AA:BB:CC:DD:EE:FF")
+    validate_gatt = AsyncMock(return_value="075625480002")
     validate_modbus = AsyncMock(return_value=None)
     validate_identity = AsyncMock(return_value=None)
-    with patch(
-        "homeassistant.components.bluetooth.async_ble_device_from_address",
-        return_value=ble_device,
-    ), patch(
-        "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
-        new=validate_gatt,
-    ), patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=validate_modbus,
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
-        new=validate_identity,
+    with (
+        patch(
+            "homeassistant.components.bluetooth.async_ble_device_from_address",
+            return_value=ble_device,
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
+            new=validate_gatt,
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=validate_modbus,
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+            new=validate_identity,
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
-                CONF_DISCOVERED_BLUETOOTH_METER: "075625100001:AA:BB:CC:DD:EE:FF",
+                CONF_DISCOVERED_BLUETOOTH_METER: "075625480002:AA:BB:CC:DD:EE:FF",
                 CONF_SLAVE_ID: 1,
                 CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
-                CONF_SCAN_INTERVAL: 15,
             },
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "075625100001"
+    assert result["title"] == "075625480002"
     assert result["data"][CONF_TRANSPORT] == TransportType.BLUETOOTH.value
     assert result["data"][CONF_BLUETOOTH_ADDRESS] == "AA:BB:CC:DD:EE:FF"
-    assert result["data"][CONF_BLUETOOTH_NAME] == "IM-075625100001"
+    assert result["data"][CONF_BLUETOOTH_NAME] == "IM-075625480002"
     assert result["data"][CONF_VARIANT] == "grow_750"
-    assert result["data"][CONF_SERIAL_NUMBER] == "075625100001"
+    assert result["data"][CONF_SERIAL_NUMBER] == "075625480002"
     assert result["data"][CONF_SLAVE_ID] == 1
     assert result["data"][CONF_TIMEOUT] == DEFAULT_BLUETOOTH_TIMEOUT
     validate_modbus.assert_not_awaited()
@@ -1979,14 +2271,13 @@ async def test_grow_bluetooth_scan_discovers_and_creates_entry(
 
 
 async def test_grow_bluetooth_scan_reports_not_paired(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Bluetooth validation should ask for host pairing when FFE9 needs encryption."""
     discovered_meter = DiscoveredGrowBluetoothMeter(
         address="AA:BB:CC:DD:EE:FF",
-        bluetooth_name="IM-075625100001",
-        serial_number="075625100001",
+        bluetooth_name="IM-075625480002",
+        serial_number="075625480002",
         variant="grow_750",
         model_title="GROW 3P4S",
         product_code="0756",
@@ -2011,23 +2302,28 @@ async def test_grow_bluetooth_scan_reports_not_paired(
         )
 
     validate_identity = AsyncMock(side_effect=IneproBluetoothNotPairedError)
-    with patch(
-        "homeassistant.components.bluetooth.async_ble_device_from_address",
-        return_value=SimpleNamespace(name="IM-075625100001", address="AA:BB:CC:DD:EE:FF"),
-    ), patch(
-        "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
-        new=AsyncMock(return_value="075625100001"),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
-        new=validate_identity,
+    with (
+        patch(
+            "homeassistant.components.bluetooth.async_ble_device_from_address",
+            return_value=SimpleNamespace(
+                name="IM-075625480002", address="AA:BB:CC:DD:EE:FF"
+            ),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
+            new=AsyncMock(return_value="075625480002"),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+            new=validate_identity,
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
-                CONF_DISCOVERED_BLUETOOTH_METER: "075625100001:AA:BB:CC:DD:EE:FF",
+                CONF_DISCOVERED_BLUETOOTH_METER: "075625480002:AA:BB:CC:DD:EE:FF",
                 CONF_SLAVE_ID: 1,
                 CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
-                CONF_SCAN_INTERVAL: 15,
             },
         )
 
@@ -2038,14 +2334,13 @@ async def test_grow_bluetooth_scan_reports_not_paired(
 
 
 async def test_grow_bluetooth_scan_error_keeps_discovered_placeholders(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Post-GATT BLE setup errors should keep placeholders and ask for pairing."""
     discovered_meter = DiscoveredGrowBluetoothMeter(
         address="AA:BB:CC:DD:EE:FF",
-        bluetooth_name="IM-075625100001",
-        serial_number="075625100001",
+        bluetooth_name="IM-075625480002",
+        serial_number="075625480002",
         variant="grow_750",
         model_title="GROW 3P4S",
         product_code="0756",
@@ -2075,26 +2370,32 @@ async def test_grow_bluetooth_scan_error_keeps_discovered_placeholders(
 
     validate_modbus = AsyncMock(return_value=None)
     validate_identity = AsyncMock(side_effect=IneproConnectionError)
-    with patch(
-        "homeassistant.components.bluetooth.async_ble_device_from_address",
-        return_value=SimpleNamespace(name="IM-075625100001", address="AA:BB:CC:DD:EE:FF"),
-    ), patch(
-        "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
-        new=AsyncMock(return_value="075625100001"),
-    ), patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=validate_modbus,
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
-        new=validate_identity,
+    with (
+        patch(
+            "homeassistant.components.bluetooth.async_ble_device_from_address",
+            return_value=SimpleNamespace(
+                name="IM-075625480002", address="AA:BB:CC:DD:EE:FF"
+            ),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
+            new=AsyncMock(return_value="075625480002"),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=validate_modbus,
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+            new=validate_identity,
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
-                CONF_DISCOVERED_BLUETOOTH_METER: "075625100001:AA:BB:CC:DD:EE:FF",
+                CONF_DISCOVERED_BLUETOOTH_METER: "075625480002:AA:BB:CC:DD:EE:FF",
                 CONF_SLAVE_ID: 1,
                 CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
-                CONF_SCAN_INTERVAL: 30,
             },
         )
 
@@ -2110,14 +2411,13 @@ async def test_grow_bluetooth_scan_error_keeps_discovered_placeholders(
 
 
 async def test_grow_bluetooth_scan_does_not_fallback_to_windows_proxy(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Normal Bluetooth scan should use HA Bluetooth only, not the developer proxy."""
     discovered_meter = DiscoveredGrowBluetoothMeter(
         address="80:F1:B2:58:DD:5A",
-        bluetooth_name="IM-075625100001",
-        serial_number="075625100001",
+        bluetooth_name="IM-075625480002",
+        serial_number="075625480002",
         variant="grow_750",
         model_title="GROW 3P4S",
         product_code="0756",
@@ -2135,13 +2435,16 @@ async def test_grow_bluetooth_scan_does_not_fallback_to_windows_proxy(
         result["flow_id"],
         user_input={CONF_FAMILY: MeterFamily.GROW.value},
     )
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_discover_grow_bluetooth_meters",
-        return_value=(),
-    ), patch(
-        "custom_components.inepro_metering.config_flow.async_discover_grow_bluetooth_proxy_meters",
-        new=AsyncMock(return_value=(discovered_meter,)),
-    ) as proxy_scan:
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_discover_grow_bluetooth_meters",
+            return_value=(),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow.async_discover_grow_bluetooth_proxy_meters",
+            new=AsyncMock(return_value=(discovered_meter,)),
+        ) as proxy_scan,
+    ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={CONF_SETUP_METHOD: SETUP_METHOD_SCAN_BLUETOOTH},
@@ -2154,21 +2457,20 @@ async def test_grow_bluetooth_scan_does_not_fallback_to_windows_proxy(
 
 
 async def test_bluetooth_rediscovery_updates_direct_bluetooth_entry(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Bluetooth rediscovery should refresh address/name for the same serial."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="075625100001",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
-            CONF_NAME: "075625100001",
+            CONF_NAME: "075625480002",
             CONF_VARIANT: "grow_750",
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_TRANSPORT: TransportType.BLUETOOTH.value,
             CONF_BLUETOOTH_ADDRESS: "AA:BB:CC:DD:EE:FF",
-            CONF_BLUETOOTH_NAME: "IM-075625100001-OLD",
+            CONF_BLUETOOTH_NAME: "IM-075625480002-OLD",
             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
             CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
             CONF_SCAN_INTERVAL: DEFAULT_BLUETOOTH_SCAN_INTERVAL,
@@ -2179,7 +2481,7 @@ async def test_bluetooth_rediscovery_updates_direct_bluetooth_entry(
                     CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
                     CONF_BLUETOOTH_ADDRESS: "AA:BB:CC:DD:EE:FF",
-                    CONF_BLUETOOTH_NAME: "IM-075625100001-OLD",
+                    CONF_BLUETOOTH_NAME: "IM-075625480002-OLD",
                 }
             ],
             CONF_ACTIVE_ROUTE: "bluetooth:AA:BB:CC:DD:EE:FF:1",
@@ -2191,7 +2493,7 @@ async def test_bluetooth_rediscovery_updates_direct_bluetooth_entry(
         DOMAIN,
         context={"source": "bluetooth"},
         data=SimpleNamespace(
-            name="IM-075625100001",
+            name="IM-075625480002",
             address="11:22:33:44:55:66",
             rssi=-42,
         ),
@@ -2200,33 +2502,32 @@ async def test_bluetooth_rediscovery_updates_direct_bluetooth_entry(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
     assert entry.data[CONF_BLUETOOTH_ADDRESS] == "11:22:33:44:55:66"
-    assert entry.data[CONF_BLUETOOTH_NAME] == "IM-075625100001"
+    assert entry.data[CONF_BLUETOOTH_NAME] == "IM-075625480002"
     assert entry.data[CONF_ACTIVE_ROUTE] == "bluetooth:11:22:33:44:55:66:1"
     assert entry.data[CONF_ROUTES][0][CONF_BLUETOOTH_ADDRESS] == "11:22:33:44:55:66"
 
 
 async def test_bluetooth_rediscovery_does_not_update_gateway_entry(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A Bluetooth rediscovery must not overwrite a shared gateway entry."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="192.0.2.13:502",
+        unique_id="192.168.68.85:502",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_NAME: "Inepro Gateway",
             CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
-            CONF_HOST: "192.0.2.13",
+            CONF_HOST: "192.168.68.85",
             CONF_PORT: 502,
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
             CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
             CONF_METERS: [
                 {
                     CONF_FAMILY: MeterFamily.GROW.value,
-                    CONF_NAME: "075625100001",
+                    CONF_NAME: "075625480002",
                     CONF_VARIANT: "grow_750",
-                    CONF_SERIAL_NUMBER: "075625100001",
+                    CONF_SERIAL_NUMBER: "075625480002",
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                 }
             ],
@@ -2238,7 +2539,7 @@ async def test_bluetooth_rediscovery_does_not_update_gateway_entry(
         DOMAIN,
         context={"source": "bluetooth"},
         data=SimpleNamespace(
-            name="IM-075625100001",
+            name="IM-075625480002",
             address="11:22:33:44:55:66",
             rssi=-42,
         ),
@@ -2246,32 +2547,31 @@ async def test_bluetooth_rediscovery_does_not_update_gateway_entry(
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured_via_gateway"
-    assert entry.data[CONF_HOST] == "192.0.2.13"
+    assert entry.data[CONF_HOST] == "192.168.68.85"
     assert CONF_BLUETOOTH_ADDRESS not in entry.data
 
 
 async def test_grow_bluetooth_scan_rejects_meter_already_on_gateway(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """User-triggered Bluetooth scan must not duplicate a gateway meter."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        unique_id="192.0.2.13:502",
+        unique_id="192.168.68.85:502",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_NAME: "Inepro Gateway",
             CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
-            CONF_HOST: "192.0.2.13",
+            CONF_HOST: "192.168.68.85",
             CONF_PORT: 502,
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
             CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
             CONF_METERS: [
                 {
                     CONF_FAMILY: MeterFamily.GROW.value,
-                    CONF_NAME: "075625100001",
+                    CONF_NAME: "075625480002",
                     CONF_VARIANT: "grow_750",
-                    CONF_SERIAL_NUMBER: "075625100001",
+                    CONF_SERIAL_NUMBER: "075625480002",
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                 }
             ],
@@ -2280,8 +2580,8 @@ async def test_grow_bluetooth_scan_rejects_meter_already_on_gateway(
     entry.add_to_hass(hass)
     discovered_meter = DiscoveredGrowBluetoothMeter(
         address="AA:BB:CC:DD:EE:FF",
-        bluetooth_name="IM-075625100001",
-        serial_number="075625100001",
+        bluetooth_name="IM-075625480002",
+        serial_number="075625480002",
         variant="grow_750",
         model_title="GROW 3P4S",
         product_code="0756",
@@ -2310,10 +2610,9 @@ async def test_grow_bluetooth_scan_rejects_meter_already_on_gateway(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            CONF_DISCOVERED_BLUETOOTH_METER: "075625100001:AA:BB:CC:DD:EE:FF",
+            CONF_DISCOVERED_BLUETOOTH_METER: "075625480002:AA:BB:CC:DD:EE:FF",
             CONF_SLAVE_ID: 1,
             CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
-            CONF_SCAN_INTERVAL: 15,
         },
     )
 
@@ -2324,8 +2623,7 @@ async def test_grow_bluetooth_scan_rejects_meter_already_on_gateway(
 
 
 async def test_grow_bluetooth_scan_updates_legacy_direct_bluetooth_entry(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """User-triggered Bluetooth scan must not duplicate legacy serial entries."""
     entry = MockConfigEntry(
@@ -2333,12 +2631,12 @@ async def test_grow_bluetooth_scan_updates_legacy_direct_bluetooth_entry(
         unique_id="AA:BB:CC:DD:EE:00",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
-            CONF_NAME: "075625100001",
+            CONF_NAME: "075625480002",
             CONF_VARIANT: "grow_750",
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_TRANSPORT: TransportType.BLUETOOTH.value,
             CONF_BLUETOOTH_ADDRESS: "AA:BB:CC:DD:EE:00",
-            CONF_BLUETOOTH_NAME: "IM-075625100001-OLD",
+            CONF_BLUETOOTH_NAME: "IM-075625480002-OLD",
             CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
             CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
             CONF_SCAN_INTERVAL: DEFAULT_BLUETOOTH_SCAN_INTERVAL,
@@ -2349,7 +2647,7 @@ async def test_grow_bluetooth_scan_updates_legacy_direct_bluetooth_entry(
                     CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
                     CONF_BLUETOOTH_ADDRESS: "AA:BB:CC:DD:EE:00",
-                    CONF_BLUETOOTH_NAME: "IM-075625100001-OLD",
+                    CONF_BLUETOOTH_NAME: "IM-075625480002-OLD",
                 }
             ],
             CONF_ACTIVE_ROUTE: "bluetooth:AA:BB:CC:DD:EE:00:1",
@@ -2358,8 +2656,8 @@ async def test_grow_bluetooth_scan_updates_legacy_direct_bluetooth_entry(
     entry.add_to_hass(hass)
     discovered_meter = DiscoveredGrowBluetoothMeter(
         address="AA:BB:CC:DD:EE:FF",
-        bluetooth_name="IM-075625100001",
-        serial_number="075625100001",
+        bluetooth_name="IM-075625480002",
+        serial_number="075625480002",
         variant="grow_750",
         model_title="GROW 3P4S",
         product_code="0756",
@@ -2386,10 +2684,9 @@ async def test_grow_bluetooth_scan_updates_legacy_direct_bluetooth_entry(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            CONF_DISCOVERED_BLUETOOTH_METER: "075625100001:AA:BB:CC:DD:EE:FF",
+            CONF_DISCOVERED_BLUETOOTH_METER: "075625480002:AA:BB:CC:DD:EE:FF",
             CONF_SLAVE_ID: 1,
             CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
-            CONF_SCAN_INTERVAL: 15,
         },
     )
 
@@ -2397,14 +2694,13 @@ async def test_grow_bluetooth_scan_updates_legacy_direct_bluetooth_entry(
     assert result["reason"] == "already_configured"
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
     assert entry.data[CONF_BLUETOOTH_ADDRESS] == "AA:BB:CC:DD:EE:FF"
-    assert entry.data[CONF_BLUETOOTH_NAME] == "IM-075625100001"
+    assert entry.data[CONF_BLUETOOTH_NAME] == "IM-075625480002"
 
 
-async def test_grow_manual_flow_stores_detected_serial_number_even_when_renamed(
-    hass,
-    enable_custom_integrations,
+async def test_grow_manual_flow_uses_detected_serial_for_title(
+    hass: HomeAssistant,
 ) -> None:
-    """Manual GROW setup should persist the detected serial independent of the UI name."""
+    """Manual GROW setup should derive the entry title from the live serial."""
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": SOURCE_USER},
@@ -2420,10 +2716,8 @@ async def test_grow_manual_flow_stores_detected_serial_number_even_when_renamed(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            CONF_NAME: "Kitchen meter",
             CONF_VARIANT: "grow_750",
             CONF_SLAVE_ID: 1,
-            CONF_SCAN_INTERVAL: 15,
         },
     )
     result = await hass.config_entries.flow.async_configure(
@@ -2431,49 +2725,53 @@ async def test_grow_manual_flow_stores_detected_serial_number_even_when_renamed(
         user_input={CONF_TRANSPORT: TransportType.TCP_ETHERNET.value},
     )
 
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_read_detected_grow_serial",
-        new=AsyncMock(return_value="075625100001"),
-    ), patch(
-        "custom_components.inepro_metering.async_setup_entry",
-        new=AsyncMock(return_value=True),
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_read_detected_grow_serial",
+            new=AsyncMock(return_value="075625480002"),
+        ),
+        patch(
+            "custom_components.inepro_metering.async_setup_entry",
+            new=AsyncMock(return_value=True),
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
-                CONF_HOST: "192.0.2.15",
+                CONF_HOST: "192.168.68.80",
                 CONF_PORT: 502,
                 CONF_TIMEOUT: 3,
             },
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == "Kitchen meter"
-    assert result["data"][CONF_SERIAL_NUMBER] == "075625100001"
+    assert result["title"] == "075625480002"
+    assert result["data"][CONF_NAME] == "075625480002"
+    assert result["data"][CONF_SERIAL_NUMBER] == "075625480002"
 
 
 async def test_grow_manual_flow_rejects_duplicate_detected_serial(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Manual setup must not create another entry for an existing meter serial."""
     existing_entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
-        unique_id="075625100001",
+        title="075625480002",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_WIFI.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            CONF_HOST: "192.0.2.10",
+            CONF_HOST: "192.168.68.76",
             CONF_PORT: 502,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
         },
     )
     existing_entry.add_to_hass(hass)
@@ -2493,10 +2791,8 @@ async def test_grow_manual_flow_rejects_duplicate_detected_serial(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            CONF_NAME: "Renamed meter",
             CONF_VARIANT: "grow_750",
             CONF_SLAVE_ID: 1,
-            CONF_SCAN_INTERVAL: 15,
         },
     )
     result = await hass.config_entries.flow.async_configure(
@@ -2504,17 +2800,20 @@ async def test_grow_manual_flow_rejects_duplicate_detected_serial(
         user_input={CONF_TRANSPORT: TransportType.TCP_ETHERNET.value},
     )
 
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_read_detected_grow_serial",
-        new=AsyncMock(return_value="075625100001"),
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_read_detected_grow_serial",
+            new=AsyncMock(return_value="075625480002"),
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
-                CONF_HOST: "192.0.2.12",
+                CONF_HOST: "192.168.68.90",
                 CONF_PORT: 1502,
                 CONF_TIMEOUT: 3,
             },
@@ -2525,28 +2824,27 @@ async def test_grow_manual_flow_rejects_duplicate_detected_serial(
 
 
 async def test_grow_manual_bluetooth_rejects_meter_already_on_gateway(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Manual Bluetooth setup must not duplicate a gateway/shared-bus meter."""
     existing_entry = MockConfigEntry(
         domain=DOMAIN,
         title="Inepro Gateway",
-        unique_id="192.0.2.13:502",
+        unique_id="192.168.68.85:502",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_NAME: "Inepro Gateway",
             CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
-            CONF_HOST: "192.0.2.13",
+            CONF_HOST: "192.168.68.85",
             CONF_PORT: 502,
             CONF_TIMEOUT: DEFAULT_TIMEOUT,
             CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
             CONF_METERS: [
                 {
                     CONF_FAMILY: MeterFamily.GROW.value,
-                    CONF_NAME: "075625100001",
+                    CONF_NAME: "075625480002",
                     CONF_VARIANT: "grow_750",
-                    CONF_SERIAL_NUMBER: "075625100001",
+                    CONF_SERIAL_NUMBER: "075625480002",
                     CONF_SLAVE_ID: DEFAULT_SLAVE_ID,
                 }
             ],
@@ -2569,10 +2867,8 @@ async def test_grow_manual_bluetooth_rejects_meter_already_on_gateway(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            CONF_NAME: "Renamed Bluetooth meter",
             CONF_VARIANT: "grow_750",
             CONF_SLAVE_ID: 1,
-            CONF_SCAN_INTERVAL: 15,
         },
     )
     result = await hass.config_entries.flow.async_configure(
@@ -2582,24 +2878,28 @@ async def test_grow_manual_bluetooth_rejects_meter_already_on_gateway(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "connection"
 
-    with patch(
-        "homeassistant.components.bluetooth.async_ble_device_from_address",
-        return_value=SimpleNamespace(
-            name="IM-075625100001",
-            address="AA:BB:CC:DD:EE:FF",
+    with (
+        patch(
+            "homeassistant.components.bluetooth.async_ble_device_from_address",
+            return_value=SimpleNamespace(
+                name="IM-075625480002",
+                address="AA:BB:CC:DD:EE:FF",
+            ),
         ),
-    ), patch(
-        "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
-        new=AsyncMock(return_value="075625100001"),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_read_detected_grow_serial",
-        new=AsyncMock(return_value="075625100001"),
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
+            new=AsyncMock(return_value="075625480002"),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_read_detected_grow_serial",
+            new=AsyncMock(return_value="075625480002"),
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
                 CONF_BLUETOOTH_ADDRESS: "AA:BB:CC:DD:EE:FF",
-                CONF_BLUETOOTH_NAME: "IM-075625100001",
+                CONF_BLUETOOTH_NAME: "IM-075625480002",
                 CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
             },
         )
@@ -2610,18 +2910,20 @@ async def test_grow_manual_bluetooth_rejects_meter_already_on_gateway(
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
 
 
-async def test_migrate_single_entry_stores_top_level_serial_number(hass) -> None:
+async def test_migrate_single_entry_stores_top_level_serial_number(
+    hass: HomeAssistant,
+) -> None:
     """Legacy single-meter entries should persist their serial in entry data."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
+        title="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            CONF_HOST: "192.0.2.15",
+            CONF_HOST: "192.168.68.80",
             CONF_PORT: 502,
             CONF_TIMEOUT: 3,
         },
@@ -2632,7 +2934,7 @@ async def test_migrate_single_entry_stores_top_level_serial_number(hass) -> None
 
     assert await async_migrate_entry(hass, entry)
     assert entry.version == 5
-    assert entry.data[CONF_SERIAL_NUMBER] == "075625100001"
+    assert entry.data[CONF_SERIAL_NUMBER] == "075625480002"
     assert entry.data[CONF_ACTIVE_ROUTE].startswith("tcp_ethernet:")
     assert entry.data[CONF_ROUTES] == [
         {
@@ -2640,19 +2942,18 @@ async def test_migrate_single_entry_stores_top_level_serial_number(hass) -> None
             CONF_SLAVE_ID: 1,
             CONF_TIMEOUT: 3,
             CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-            CONF_HOST: "192.0.2.15",
+            CONF_HOST: "192.168.68.80",
             CONF_PORT: 502,
         }
     ]
 
 
 async def test_validate_entry_identity_uses_stored_serial_number(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Identity validation should use stored serial metadata instead of the entry name."""
     client = AsyncMock()
-    client.async_read_registers = AsyncMock(return_value=[0x2510, 0x0001])
+    client.async_read_registers = AsyncMock(return_value=[0x2548, 0x0002])
     client.async_close = AsyncMock(return_value=None)
 
     with patch(
@@ -2663,11 +2964,11 @@ async def test_validate_entry_identity_uses_stored_serial_number(
             {
                 CONF_FAMILY: MeterFamily.GROW.value,
                 CONF_NAME: "Kitchen meter",
-                CONF_SERIAL_NUMBER: "075625100001",
+                CONF_SERIAL_NUMBER: "075625480002",
                 CONF_VARIANT: "grow_750",
                 CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
                 CONF_SLAVE_ID: 1,
-                CONF_HOST: "192.0.2.15",
+                CONF_HOST: "192.168.68.80",
                 CONF_PORT: 502,
                 CONF_TIMEOUT: 3,
             }
@@ -2683,8 +2984,7 @@ async def test_validate_entry_identity_uses_stored_serial_number(
 
 
 async def test_grow_serial_scan_appends_new_meter_to_existing_bus(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Scanning an existing bus should append newly found meters to that bus entry."""
     existing_entry = MockConfigEntry(
@@ -2715,7 +3015,7 @@ async def test_grow_serial_scan_appends_new_meter_to_existing_bus(
     existing_entry.add_to_hass(hass)
 
     discovered_meter = DiscoveredGrowMeter(
-        serial_number="075625100001",
+        serial_number="075625480002",
         slave_id=157,
         variant="grow_750",
         model_title="GROW 3P4S",
@@ -2754,20 +3054,18 @@ async def test_grow_serial_scan_appends_new_meter_to_existing_bus(
                 CONF_TIMEOUT: 2,
                 "slave_id_start": 1,
                 "slave_id_end": 200,
-                CONF_SCAN_INTERVAL: 20,
             },
         )
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
-                "discovered_meters": ["075625100001:157"],
-                CONF_SCAN_INTERVAL: 20,
+                "discovered_meters": ["075625480002:157"],
             },
         )
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "meter_added_to_existing_bus"
-    assert existing_entry.data[CONF_SCAN_INTERVAL] == 20
+    assert existing_entry.data[CONF_SCAN_INTERVAL] == 15
     assert existing_entry.data[CONF_METERS] == [
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
@@ -2781,20 +3079,19 @@ async def test_grow_serial_scan_appends_new_meter_to_existing_bus(
         ),
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
-            name="075625100001",
+            name="075625480002",
             variant="grow_750",
             slave_id=157,
             serial_port="COM5",
             timeout=3,
-            serial_number="075625100001",
+            serial_number="075625480002",
             product_code="0756",
         ),
     ]
 
 
 async def test_pro_manual_serial_flow_can_append_to_existing_grow_bus(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Manual PRO setup should append to an existing shared serial bus entry."""
     existing_entry = MockConfigEntry(
@@ -2836,10 +3133,8 @@ async def test_pro_manual_serial_flow_can_append_to_existing_grow_bus(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            CONF_NAME: "PRO380 Lab",
             CONF_VARIANT: "pro_380",
             CONF_SLAVE_ID: 41,
-            CONF_SCAN_INTERVAL: 15,
         },
     )
     assert result["type"] is FlowResultType.FORM
@@ -2884,7 +3179,7 @@ async def test_pro_manual_serial_flow_can_append_to_existing_grow_bus(
         ),
         _expected_bus_meter(
             family=MeterFamily.PRO.value,
-            name="PRO380 Lab",
+            name=get_profile(MeterFamily.PRO.value, "pro_380").title,
             variant="pro_380",
             slave_id=41,
             serial_port="COM5",
@@ -2894,8 +3189,7 @@ async def test_pro_manual_serial_flow_can_append_to_existing_grow_bus(
 
 
 async def test_serial_bus_options_flow_can_append_new_meter(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The options flow should let an existing serial bus entry grow with new meters."""
     entry = MockConfigEntry(
@@ -2926,7 +3220,7 @@ async def test_serial_bus_options_flow_can_append_new_meter(
     entry.add_to_hass(hass)
 
     discovered_meter = DiscoveredGrowMeter(
-        serial_number="075625100001",
+        serial_number="075625480002",
         slave_id=157,
         variant="grow_750",
         model_title="GROW 3P4S",
@@ -2957,7 +3251,6 @@ async def test_serial_bus_options_flow_can_append_new_meter(
             user_input={
                 "slave_id_start": 1,
                 "slave_id_end": 200,
-                CONF_SCAN_INTERVAL: 20,
             },
         )
         assert result["type"] is FlowResultType.FORM
@@ -2966,13 +3259,12 @@ async def test_serial_bus_options_flow_can_append_new_meter(
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
-                "discovered_meters": ["075625100001:157"],
-                CONF_SCAN_INTERVAL: 20,
+                "discovered_meters": ["075625480002:157"],
             },
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.data[CONF_SCAN_INTERVAL] == 20
+    assert entry.data[CONF_SCAN_INTERVAL] == 15
     assert entry.data[CONF_METERS] == [
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
@@ -2986,24 +3278,23 @@ async def test_serial_bus_options_flow_can_append_new_meter(
         ),
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
-            name="075625100001",
+            name="075625480002",
             variant="grow_750",
             slave_id=157,
             serial_port="COM5",
             timeout=3,
-            serial_number="075625100001",
+            serial_number="075625480002",
             product_code="0756",
         ),
     ]
 
 
 async def test_grow_gateway_scan_flow_can_create_shared_gateway_bus(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Scanning a TCP gateway should create one shared Modbus bus entry."""
     discovered_meter = DiscoveredGrowMeter(
-        serial_number="075625100001",
+        serial_number="075625480002",
         slave_id=7,
         variant="grow_750",
         model_title="GROW 3P4S",
@@ -3042,7 +3333,6 @@ async def test_grow_gateway_scan_flow_can_create_shared_gateway_bus(
                 CONF_TIMEOUT: 3,
                 "slave_id_start": 1,
                 "slave_id_end": 32,
-                CONF_SCAN_INTERVAL: 30,
             },
         )
         assert result["type"] is FlowResultType.FORM
@@ -3051,8 +3341,7 @@ async def test_grow_gateway_scan_flow_can_create_shared_gateway_bus(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
-                "discovered_meters": ["075625100001:7"],
-                CONF_SCAN_INTERVAL: 30,
+                "discovered_meters": ["075625480002:7"],
             },
         )
 
@@ -3063,22 +3352,21 @@ async def test_grow_gateway_scan_flow_can_create_shared_gateway_bus(
     assert result["data"][CONF_METERS] == [
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
-            name="075625100001",
+            name="075625480002",
             variant="grow_750",
             slave_id=7,
             transport=TransportType.TCP_GATEWAY,
             host="10.5.2.14",
             port=502,
             timeout=3,
-            serial_number="075625100001",
+            serial_number="075625480002",
             product_code="0756",
         )
     ]
 
 
 async def test_gateway_device_scan_flow_can_create_pro_shared_gateway_bus(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Adding a gateway directly should create a PRO shared-bus entry."""
     discovered_meter = DiscoveredGrowMeter(
@@ -3122,7 +3410,6 @@ async def test_gateway_device_scan_flow_can_create_pro_shared_gateway_bus(
                 CONF_TIMEOUT: 3,
                 "slave_id_start": 1,
                 "slave_id_end": DEFAULT_GATEWAY_SCAN_SLAVE_ID_END,
-                CONF_SCAN_INTERVAL: 30,
             },
         )
         assert result["type"] is FlowResultType.FORM
@@ -3132,7 +3419,6 @@ async def test_gateway_device_scan_flow_can_create_pro_shared_gateway_bus(
             result["flow_id"],
             user_input={
                 "discovered_meters": ["025423266355:5"],
-                CONF_SCAN_INTERVAL: 30,
             },
         )
 
@@ -3157,8 +3443,7 @@ async def test_gateway_device_scan_flow_can_create_pro_shared_gateway_bus(
 
 
 async def test_pro_manual_gateway_flow_can_append_to_existing_gateway_bus(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Manual PRO setup should append to an existing shared TCP gateway bus entry."""
     existing_entry = MockConfigEntry(
@@ -3197,10 +3482,8 @@ async def test_pro_manual_gateway_flow_can_append_to_existing_gateway_bus(
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={
-            CONF_NAME: "PRO380 Gateway",
             CONF_VARIANT: "pro_380",
             CONF_SLAVE_ID: 41,
-            CONF_SCAN_INTERVAL: 15,
         },
     )
     result = await hass.config_entries.flow.async_configure(
@@ -3241,7 +3524,7 @@ async def test_pro_manual_gateway_flow_can_append_to_existing_gateway_bus(
         ),
         _expected_bus_meter(
             family=MeterFamily.PRO.value,
-            name="PRO380 Gateway",
+            name=get_profile(MeterFamily.PRO.value, "pro_380").title,
             variant="pro_380",
             slave_id=41,
             transport=TransportType.TCP_GATEWAY,
@@ -3252,11 +3535,14 @@ async def test_pro_manual_gateway_flow_can_append_to_existing_gateway_bus(
     ]
 
 
+@pytest.mark.parametrize(
+    "ignore_missing_translations",
+    [EDIT_SERIAL_BUS_DYNAMIC_OPTIONS_FIELD_TRANSLATIONS],
+)
 async def test_serial_bus_options_flow_can_edit_bus_and_meter_addresses(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
-    """The options flow should rename a bus and edit each meter's Modbus ID."""
+    """The options flow should edit bus settings and each meter's Modbus ID."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         title="085125250008",
@@ -3279,10 +3565,10 @@ async def test_serial_bus_options_flow_can_edit_bus_and_meter_addresses(
                     "product_code": "0851",
                 },
                 {
-                    "name": "080125100002",
+                    "name": "080125260007",
                     CONF_VARIANT: "grow_800",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "080125100002",
+                    "serial_number": "080125260007",
                     "product_code": "0801",
                 },
             ],
@@ -3302,29 +3588,29 @@ async def test_serial_bus_options_flow_can_edit_bus_and_meter_addresses(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "edit_serial_bus"
 
-    with patch.object(hass.config_entries, "async_reload", AsyncMock(return_value=True)):
+    with patch.object(
+        hass.config_entries, "async_reload", AsyncMock(return_value=True)
+    ):
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
-                CONF_NAME: "Main RS485 Bus",
                 CONF_SERIAL_PORT: "COM6",
                 CONF_BAUDRATE: 19200,
                 CONF_BYTESIZE: 8,
                 CONF_PARITY: "N",
                 CONF_STOPBITS: 1,
                 CONF_TIMEOUT: 5,
-                CONF_SCAN_INTERVAL: 30,
                 "Modbus ID for 085125250008": 5,
-                "Modbus ID for 080125100002": 158,
+                "Modbus ID for 080125260007": 158,
             },
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.title == "Main RS485 Bus"
+    assert entry.title == "085125250008"
     assert entry.data[CONF_SERIAL_PORT] == "COM6"
     assert entry.data[CONF_BAUDRATE] == 19200
     assert entry.data[CONF_PARITY] == "N"
-    assert entry.data[CONF_SCAN_INTERVAL] == 30
+    assert entry.data[CONF_SCAN_INTERVAL] == 15
     assert entry.data[CONF_METERS] == [
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
@@ -3340,12 +3626,12 @@ async def test_serial_bus_options_flow_can_edit_bus_and_meter_addresses(
         ),
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
-            name="080125100002",
+            name="080125260007",
             variant="grow_800",
             slave_id=158,
             serial_port="COM6",
             timeout=5,
-            serial_number="080125100002",
+            serial_number="080125260007",
             product_code="0801",
             baudrate=19200,
             parity="N",
@@ -3354,8 +3640,7 @@ async def test_serial_bus_options_flow_can_edit_bus_and_meter_addresses(
 
 
 async def test_serial_bus_manage_routes_action_selects_meter(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Shared serial-bus entries should allow choosing one meter for route management."""
     entry = MockConfigEntry(
@@ -3412,8 +3697,7 @@ async def test_serial_bus_manage_routes_action_selects_meter(
 
 
 async def test_shared_bus_meter_can_add_and_switch_routes(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Shared serial-bus meters should support their own stored routes and active route."""
     entry = MockConfigEntry(
@@ -3432,10 +3716,10 @@ async def test_shared_bus_meter_can_add_and_switch_routes(
             CONF_METERS: [
                 {
                     CONF_FAMILY: MeterFamily.GROW.value,
-                    CONF_NAME: "075625100001",
+                    CONF_NAME: "075625480002",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 1,
-                    CONF_SERIAL_NUMBER: "075625100001",
+                    CONF_SERIAL_NUMBER: "075625480002",
                     "product_code": "0756",
                 },
                 {
@@ -3460,7 +3744,7 @@ async def test_shared_bus_meter_can_add_and_switch_routes(
 
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
-        user_input={CONF_SELECTED_METER: "075625100001"},
+        user_input={CONF_SELECTED_METER: "075625480002"},
     )
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "manage_meter_routes"
@@ -3481,8 +3765,8 @@ async def test_shared_bus_meter_can_add_and_switch_routes(
 
     discovered_meter = DiscoveredGrowBluetoothMeter(
         address="80:F1:B2:58:DD:5A",
-        bluetooth_name="IM-075625100001",
-        serial_number="075625100001",
+        bluetooth_name="IM-075625480002",
+        serial_number="075625480002",
         variant="grow_750",
         model_title="GROW 3P4S",
         product_code="0756",
@@ -3500,11 +3784,11 @@ async def test_shared_bus_meter_can_add_and_switch_routes(
     assert result["step_id"] == "add_route_bluetooth_discovered"
     assert result["description_placeholders"] == {
         "count": "1",
-        "meter": "075625100001",
+        "meter": "075625480002",
     }
 
-    ble_device = SimpleNamespace(name="IM-075625100001", address="80:F1:B2:58:DD:5A")
-    validate_gatt = AsyncMock(return_value="075625100001")
+    ble_device = SimpleNamespace(name="IM-075625480002", address="80:F1:B2:58:DD:5A")
+    validate_gatt = AsyncMock(return_value="075625480002")
     validate_modbus = AsyncMock(return_value=None)
     validate_identity = AsyncMock(return_value=None)
     with (
@@ -3529,7 +3813,7 @@ async def test_shared_bus_meter_can_add_and_switch_routes(
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
-                CONF_DISCOVERED_BLUETOOTH_METER: "075625100001:80:F1:B2:58:DD:5A",
+                CONF_DISCOVERED_BLUETOOTH_METER: "075625480002:80:F1:B2:58:DD:5A",
                 CONF_SLAVE_ID: 1,
                 CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
             },
@@ -3539,7 +3823,7 @@ async def test_shared_bus_meter_can_add_and_switch_routes(
     grow_meter = next(
         meter
         for meter in entry.data[CONF_METERS]
-        if meter.get(CONF_SERIAL_NUMBER) == "075625100001"
+        if meter.get(CONF_SERIAL_NUMBER) == "075625480002"
     )
     assert len(grow_meter[CONF_ROUTES]) == 2
     assert grow_meter[CONF_ACTIVE_ROUTE] == "serial:COM5:1"
@@ -3573,7 +3857,7 @@ async def test_shared_bus_meter_can_add_and_switch_routes(
     )
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
-        user_input={CONF_SELECTED_METER: "075625100001"},
+        user_input={CONF_SELECTED_METER: "075625480002"},
     )
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
@@ -3589,7 +3873,7 @@ async def test_shared_bus_meter_can_add_and_switch_routes(
         ),
         patch(
             "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
-            new=AsyncMock(return_value="075625100001"),
+            new=AsyncMock(return_value="075625480002"),
         ),
         patch(
             "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
@@ -3610,29 +3894,28 @@ async def test_shared_bus_meter_can_add_and_switch_routes(
     grow_meter = next(
         meter
         for meter in entry.data[CONF_METERS]
-        if meter.get(CONF_SERIAL_NUMBER) == "075625100001"
+        if meter.get(CONF_SERIAL_NUMBER) == "075625480002"
     )
     assert grow_meter[CONF_ACTIVE_ROUTE].startswith("bluetooth:")
 
 
 async def test_tcp_options_flow_can_edit_host_port_and_modbus_address(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The options flow should update TCP route details without changing identity."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
+        title="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            CONF_HOST: "192.0.2.15",
+            CONF_HOST: "192.168.68.80",
             CONF_PORT: 502,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
         },
         version=2,
     )
@@ -3664,42 +3947,40 @@ async def test_tcp_options_flow_can_edit_host_port_and_modbus_address(
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
-                CONF_HOST: "192.0.2.13",
+                CONF_HOST: "192.168.68.85",
                 CONF_PORT: 1502,
                 CONF_SLAVE_ID: 2,
                 CONF_TIMEOUT: 4,
-                CONF_SCAN_INTERVAL: 20,
             },
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.title == "075625100001"
-    assert entry.data[CONF_HOST] == "192.0.2.13"
+    assert entry.title == "075625480002"
+    assert entry.data[CONF_HOST] == "192.168.68.85"
     assert entry.data[CONF_PORT] == 1502
     assert entry.data[CONF_SLAVE_ID] == 2
     assert entry.data[CONF_TIMEOUT] == 4
-    assert entry.data[CONF_SCAN_INTERVAL] == 20
+    assert entry.data[CONF_SCAN_INTERVAL] == 15
     validate_mock.assert_awaited_once()
 
 
-async def test_bluetooth_options_flow_can_edit_address_name_and_polling(
-    hass,
-    enable_custom_integrations,
+async def test_bluetooth_options_flow_can_edit_address_name_and_preserve_polling(
+    hass: HomeAssistant,
 ) -> None:
     """The options flow should update Bluetooth route details without changing identity."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
+        title="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.BLUETOOTH.value,
             CONF_BLUETOOTH_ADDRESS: "AA:BB:CC:DD:EE:FF",
-            CONF_BLUETOOTH_NAME: "IM-075625100001",
+            CONF_BLUETOOTH_NAME: "IM-075625480002",
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
         },
         version=2,
     )
@@ -3719,7 +4000,7 @@ async def test_bluetooth_options_flow_can_edit_address_name_and_polling(
     validate_mock = AsyncMock(return_value=None)
     validate_identity = AsyncMock(return_value=None)
     ble_device = SimpleNamespace(
-        name="IM-075625100001-NEW",
+        name="IM-075625480002-NEW",
         address="11:22:33:44:55:66",
     )
     with (
@@ -3729,7 +4010,7 @@ async def test_bluetooth_options_flow_can_edit_address_name_and_polling(
         ),
         patch(
             "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
-            new=AsyncMock(return_value="075625100001"),
+            new=AsyncMock(return_value="075625480002"),
         ),
         patch(
             "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
@@ -3745,32 +4026,30 @@ async def test_bluetooth_options_flow_can_edit_address_name_and_polling(
             result["flow_id"],
             user_input={
                 CONF_BLUETOOTH_ADDRESS: "11:22:33:44:55:66",
-                CONF_BLUETOOTH_NAME: "IM-075625100001-NEW",
+                CONF_BLUETOOTH_NAME: "IM-075625480002-NEW",
                 CONF_SLAVE_ID: 2,
                 CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
-                CONF_SCAN_INTERVAL: 25,
             },
         )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.title == "075625100001"
+    assert entry.title == "075625480002"
     assert entry.data[CONF_BLUETOOTH_ADDRESS] == "11:22:33:44:55:66"
-    assert entry.data[CONF_BLUETOOTH_NAME] == "IM-075625100001-NEW"
+    assert entry.data[CONF_BLUETOOTH_NAME] == "IM-075625480002-NEW"
     assert entry.data[CONF_SLAVE_ID] == 2
     assert entry.data[CONF_TIMEOUT] == DEFAULT_BLUETOOTH_TIMEOUT
-    assert entry.data[CONF_SCAN_INTERVAL] == 25
+    assert entry.data[CONF_SCAN_INTERVAL] == 15
     validate_mock.assert_not_awaited()
     validate_identity.assert_awaited_once()
 
 
 async def test_bluetooth_proxy_options_flow_can_edit_proxy_and_ble_details(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The options flow should update Windows BLE proxy route details safely."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
+        title="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
@@ -3778,11 +4057,11 @@ async def test_bluetooth_proxy_options_flow_can_edit_proxy_and_ble_details(
             CONF_HOST: DEFAULT_BLE_PROXY_HOST,
             CONF_PORT: DEFAULT_BLE_PROXY_PORT,
             CONF_BLUETOOTH_ADDRESS: "AA:BB:CC:DD:EE:FF",
-            CONF_BLUETOOTH_NAME: "IM-075625100001",
+            CONF_BLUETOOTH_NAME: "IM-075625480002",
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
         },
         version=2,
     )
@@ -3817,10 +4096,9 @@ async def test_bluetooth_proxy_options_flow_can_edit_proxy_and_ble_details(
                 CONF_HOST: "127.0.0.1",
                 CONF_PORT: 16026,
                 CONF_BLUETOOTH_ADDRESS: "11:22:33:44:55:66",
-                CONF_BLUETOOTH_NAME: "IM-075625100001-NEW",
+                CONF_BLUETOOTH_NAME: "IM-075625480002-NEW",
                 CONF_SLAVE_ID: 2,
                 CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
-                CONF_SCAN_INTERVAL: 25,
             },
         )
 
@@ -3828,39 +4106,39 @@ async def test_bluetooth_proxy_options_flow_can_edit_proxy_and_ble_details(
     assert entry.data[CONF_HOST] == "127.0.0.1"
     assert entry.data[CONF_PORT] == 16026
     assert entry.data[CONF_BLUETOOTH_ADDRESS] == "11:22:33:44:55:66"
-    assert entry.data[CONF_BLUETOOTH_NAME] == "IM-075625100001-NEW"
+    assert entry.data[CONF_BLUETOOTH_NAME] == "IM-075625480002-NEW"
     assert entry.data[CONF_SLAVE_ID] == 2
     assert entry.data[CONF_TIMEOUT] == DEFAULT_BLUETOOTH_TIMEOUT
-    assert entry.data[CONF_SCAN_INTERVAL] == 25
+    assert entry.data[CONF_SCAN_INTERVAL] == 15
     validate_mock.assert_awaited_once()
 
 
+@pytest.mark.usefixtures("real_entry_setup")
 async def test_options_submit_preserves_active_route_and_deduplicates_routes(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
-    """Submitting options should preserve the selected route and clean duplicates."""
+    """Connection updates should keep active routes and avoid the old polling-only path."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
-        unique_id="075625100001",
+        title="075625480002",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_WIFI.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            CONF_HOST: "192.0.2.14",
+            CONF_HOST: "192.168.68.88",
             CONF_PORT: 502,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_ROUTES: [
                 {
                     CONF_TRANSPORT: TransportType.TCP_WIFI.value,
                     CONF_SLAVE_ID: 1,
                     CONF_TIMEOUT: 3,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.10",
+                    CONF_HOST: "192.168.68.76",
                     CONF_PORT: 502,
                 },
                 {
@@ -3868,7 +4146,7 @@ async def test_options_submit_preserves_active_route_and_deduplicates_routes(
                     CONF_SLAVE_ID: 1,
                     CONF_TIMEOUT: 4,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.14",
+                    CONF_HOST: "192.168.68.88",
                     CONF_PORT: 502,
                 },
                 {
@@ -3876,11 +4154,11 @@ async def test_options_submit_preserves_active_route_and_deduplicates_routes(
                     CONF_SLAVE_ID: 1,
                     CONF_TIMEOUT: 5,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.10",
+                    CONF_HOST: "192.168.68.76",
                     CONF_PORT: 502,
                 },
             ],
-            CONF_ACTIVE_ROUTE: "tcp_wifi:192.0.2.14:502:1",
+            CONF_ACTIVE_ROUTE: "tcp_wifi:192.168.68.88:502:1",
         },
         version=5,
     )
@@ -3913,65 +4191,88 @@ async def test_options_submit_preserves_active_route_and_deduplicates_routes(
         result = await hass.config_entries.options.async_init(entry.entry_id)
         assert result["type"] is FlowResultType.FORM
         assert result["step_id"] == "init"
+        action_selector = _schema_selector(result["data_schema"], "action")
+        action_options = {
+            option["value"] for option in action_selector.config["options"]
+        }
+        assert "update_polling" not in action_options
 
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
-            user_input={"action": "update_polling"},
+            user_input={"action": "update_connection"},
         )
         assert result["type"] is FlowResultType.FORM
-        assert result["step_id"] == "update_polling"
+        assert result["step_id"] == "update_connection"
 
-        result = await hass.config_entries.options.async_configure(
-            result["flow_id"],
-            user_input={CONF_SCAN_INTERVAL: 20},
-        )
+        validate_mock = AsyncMock(return_value=None)
+        with (
+            patch(
+                "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+                new=validate_mock,
+            ),
+            patch(
+                "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                hass.config_entries, "async_reload", AsyncMock(return_value=True)
+            ),
+        ):
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"],
+                user_input={
+                    CONF_HOST: "192.168.68.88",
+                    CONF_PORT: 502,
+                    CONF_TIMEOUT: 4,
+                },
+            )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.state is ConfigEntryState.LOADED
-    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_wifi:192.0.2.14:502:1"
-    assert entry.data[CONF_HOST] == "192.0.2.14"
+    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_wifi:192.168.68.88:502:1"
+    assert entry.data[CONF_HOST] == "192.168.68.88"
     assert entry.data[CONF_PORT] == 502
-    assert entry.data[CONF_SCAN_INTERVAL] == 20
+    assert entry.data[CONF_SCAN_INTERVAL] == 15
     assert len(entry.data[CONF_ROUTES]) == 2
     route_keys = [build_route_key(route) for route in get_configured_routes(entry.data)]
     assert route_keys == [
-        "tcp_wifi:192.0.2.10:502:1",
-        "tcp_wifi:192.0.2.14:502:1",
+        "tcp_wifi:192.168.68.76:502:1",
+        "tcp_wifi:192.168.68.88:502:1",
     ]
     first_route = entry.data[CONF_ROUTES][0]
-    assert first_route[CONF_HOST] == "192.0.2.10"
+    assert first_route[CONF_HOST] == "192.168.68.76"
     assert first_route[CONF_TIMEOUT] == 5
+    validate_mock.assert_awaited_once()
 
 
 async def test_options_flow_can_add_onboarding_route_and_switch_active_route(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Single-meter entries should store extra routes and allow switching the active one."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
+        title="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            CONF_HOST: "192.0.2.15",
+            CONF_HOST: "192.168.68.80",
             CONF_PORT: 502,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_ROUTES: [
                 {
                     CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
                     CONF_SLAVE_ID: 1,
                     CONF_TIMEOUT: 3,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.15",
+                    CONF_HOST: "192.168.68.80",
                     CONF_PORT: 502,
                 }
             ],
-            CONF_ACTIVE_ROUTE: "tcp_ethernet:192.0.2.15:502:1",
+            CONF_ACTIVE_ROUTE: "tcp_ethernet:192.168.68.80:502:1",
         },
         version=4,
     )
@@ -3997,8 +4298,8 @@ async def test_options_flow_can_add_onboarding_route_and_switch_active_route(
 
     discovered_meter = DiscoveredGrowBluetoothMeter(
         address="80:F1:B2:58:DD:5A",
-        bluetooth_name="IM-075625100001",
-        serial_number="075625100001",
+        bluetooth_name="IM-075625480002",
+        serial_number="075625480002",
         variant="grow_750",
         model_title="GROW 3P4S",
         product_code="0756",
@@ -4016,10 +4317,10 @@ async def test_options_flow_can_add_onboarding_route_and_switch_active_route(
     assert result["step_id"] == "add_route_bluetooth_discovered"
     assert result["description_placeholders"] == {
         "count": "1",
-        "meter": "075625100001",
+        "meter": "075625480002",
     }
 
-    ble_device = SimpleNamespace(name="IM-075625100001", address="80:F1:B2:58:DD:5A")
+    ble_device = SimpleNamespace(name="IM-075625480002", address="80:F1:B2:58:DD:5A")
     validate_identity = AsyncMock(return_value=None)
     with (
         patch(
@@ -4028,7 +4329,7 @@ async def test_options_flow_can_add_onboarding_route_and_switch_active_route(
         ),
         patch(
             "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
-            new=AsyncMock(return_value="075625100001"),
+            new=AsyncMock(return_value="075625480002"),
         ),
         patch(
             "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
@@ -4043,7 +4344,7 @@ async def test_options_flow_can_add_onboarding_route_and_switch_active_route(
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
-                CONF_DISCOVERED_BLUETOOTH_METER: "075625100001:80:F1:B2:58:DD:5A",
+                CONF_DISCOVERED_BLUETOOTH_METER: "075625480002:80:F1:B2:58:DD:5A",
                 CONF_SLAVE_ID: 1,
                 CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
             },
@@ -4051,7 +4352,7 @@ async def test_options_flow_can_add_onboarding_route_and_switch_active_route(
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.data[CONF_TRANSPORT] == TransportType.TCP_ETHERNET.value
-    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_ethernet:192.0.2.15:502:1"
+    assert entry.data[CONF_ACTIVE_ROUTE] == "tcp_ethernet:192.168.68.80:502:1"
     assert len(entry.data[CONF_ROUTES]) == 2
 
     routes = get_configured_routes(entry.data)
@@ -4071,8 +4372,7 @@ async def test_options_flow_can_add_onboarding_route_and_switch_active_route(
     assert CONF_ROUTES not in validate_identity.call_args.args[0]
     assert CONF_ACTIVE_ROUTE not in validate_identity.call_args.args[0]
     assert all(
-        CONF_BLUETOOTH_PAIRING_PIN not in route
-        for route in entry.data[CONF_ROUTES]
+        CONF_BLUETOOTH_PAIRING_PIN not in route for route in entry.data[CONF_ROUTES]
     )
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
@@ -4090,7 +4390,7 @@ async def test_options_flow_can_add_onboarding_route_and_switch_active_route(
         ),
         patch(
             "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
-            new=AsyncMock(return_value="075625100001"),
+            new=AsyncMock(return_value="075625480002"),
         ),
         patch(
             "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
@@ -4114,34 +4414,33 @@ async def test_options_flow_can_add_onboarding_route_and_switch_active_route(
 
 
 async def test_add_serial_route_skips_helper_only_purpose_step(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Serial routes should skip the helper-only purpose chooser."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
+        title="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            CONF_HOST: "192.0.2.15",
+            CONF_HOST: "192.168.68.80",
             CONF_PORT: 502,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_ROUTES: [
                 {
                     CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
                     CONF_SLAVE_ID: 1,
                     CONF_TIMEOUT: 3,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.15",
+                    CONF_HOST: "192.168.68.80",
                     CONF_PORT: 502,
                 }
             ],
-            CONF_ACTIVE_ROUTE: "tcp_ethernet:192.0.2.15:502:1",
+            CONF_ACTIVE_ROUTE: "tcp_ethernet:192.168.68.80:502:1",
         },
         version=4,
     )
@@ -4167,23 +4466,22 @@ async def test_add_serial_route_skips_helper_only_purpose_step(
 
 
 async def test_tcp_options_flow_rejects_connection_update_to_different_meter(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The options flow must reject route changes that point to another meter."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
+        title="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            CONF_HOST: "192.0.2.15",
+            CONF_HOST: "192.168.68.80",
             CONF_PORT: 502,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
         },
         version=2,
     )
@@ -4200,61 +4498,62 @@ async def test_tcp_options_flow_rejects_connection_update_to_different_meter(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "update_connection"
 
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
-        new=AsyncMock(side_effect=IneproIdentityError),
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+            new=AsyncMock(side_effect=IneproIdentityError),
+        ),
     ):
         result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             user_input={
-                CONF_HOST: "192.0.2.13",
+                CONF_HOST: "192.168.68.85",
                 CONF_PORT: 1502,
                 CONF_SLAVE_ID: 2,
                 CONF_TIMEOUT: 4,
-                CONF_SCAN_INTERVAL: 20,
             },
         )
 
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "update_connection"
     assert result["errors"] == {"base": "invalid_identity"}
-    assert entry.data[CONF_HOST] == "192.0.2.15"
+    assert entry.data[CONF_HOST] == "192.168.68.80"
     assert entry.data[CONF_PORT] == 502
 
 
 async def test_reconfigure_flow_can_switch_single_meter_transport(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Reconfigure should update one single-meter entry in place."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
-        unique_id="075625100001",
+        title="075625480002",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            CONF_HOST: "192.0.2.15",
+            CONF_HOST: "192.168.68.80",
             CONF_PORT: 502,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_ROUTES: [
                 {
                     CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
                     CONF_SLAVE_ID: 1,
                     CONF_TIMEOUT: 3,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.15",
+                    CONF_HOST: "192.168.68.80",
                     CONF_PORT: 502,
                 }
             ],
-            CONF_ACTIVE_ROUTE: "tcp_ethernet:192.0.2.15:502:1",
+            CONF_ACTIVE_ROUTE: "tcp_ethernet:192.168.68.80:502:1",
         },
         version=5,
     )
@@ -4274,7 +4573,9 @@ async def test_reconfigure_flow_can_switch_single_meter_transport(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "connection"
 
-    ble_device = SimpleNamespace(name="IM-075625100001-NEW", address="11:22:33:44:55:66")
+    ble_device = SimpleNamespace(
+        name="IM-075625480002-NEW", address="11:22:33:44:55:66"
+    )
     with (
         patch(
             "homeassistant.components.bluetooth.async_ble_device_from_address",
@@ -4282,7 +4583,7 @@ async def test_reconfigure_flow_can_switch_single_meter_transport(
         ),
         patch(
             "custom_components.inepro_metering.config_flow.async_validate_bluetooth_gatt_identity",
-            new=AsyncMock(return_value="075625100001"),
+            new=AsyncMock(return_value="075625480002"),
         ),
         patch(
             "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
@@ -4298,52 +4599,51 @@ async def test_reconfigure_flow_can_switch_single_meter_transport(
             result["flow_id"],
             user_input={
                 CONF_BLUETOOTH_ADDRESS: "11:22:33:44:55:66",
-                CONF_BLUETOOTH_NAME: "IM-075625100001-NEW",
+                CONF_BLUETOOTH_NAME: "IM-075625480002-NEW",
                 CONF_TIMEOUT: DEFAULT_BLUETOOTH_TIMEOUT,
             },
         )
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
-    assert entry.unique_id == "075625100001"
+    assert entry.unique_id == "075625480002"
     assert entry.data[CONF_TRANSPORT] == TransportType.BLUETOOTH.value
     assert entry.data[CONF_BLUETOOTH_ADDRESS] == "11:22:33:44:55:66"
-    assert entry.data[CONF_BLUETOOTH_NAME] == "IM-075625100001-NEW"
+    assert entry.data[CONF_BLUETOOTH_NAME] == "IM-075625480002-NEW"
     assert entry.data[CONF_ACTIVE_ROUTE].startswith("bluetooth:")
     assert len(entry.data[CONF_ROUTES]) == 2
     schedule_reload.assert_called_once_with(entry.entry_id)
 
 
 async def test_reconfigure_flow_rejects_identity_mismatch(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Reconfigure must keep the existing physical meter identity stable."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
-        unique_id="075625100001",
+        title="075625480002",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            CONF_HOST: "192.0.2.15",
+            CONF_HOST: "192.168.68.80",
             CONF_PORT: 502,
             CONF_TIMEOUT: 3,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
             CONF_ROUTES: [
                 {
                     CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
                     CONF_SLAVE_ID: 1,
                     CONF_TIMEOUT: 3,
                     CONF_ROUTE_PURPOSE: ROUTE_PURPOSE_ACTIVE,
-                    CONF_HOST: "192.0.2.15",
+                    CONF_HOST: "192.168.68.80",
                     CONF_PORT: 502,
                 }
             ],
-            CONF_ACTIVE_ROUTE: "tcp_ethernet:192.0.2.15:502:1",
+            CONF_ACTIVE_ROUTE: "tcp_ethernet:192.168.68.80:502:1",
         },
         version=5,
     )
@@ -4358,17 +4658,20 @@ async def test_reconfigure_flow_rejects_identity_mismatch(
         user_input={CONF_TRANSPORT: TransportType.TCP_ETHERNET.value},
     )
 
-    with patch(
-        "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
-        new=AsyncMock(return_value=None),
-    ), patch(
-        "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
-        new=AsyncMock(side_effect=IneproIdentityError),
+    with (
+        patch(
+            "custom_components.inepro_metering.config_flow.async_validate_modbus_config",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "custom_components.inepro_metering.config_flow._async_validate_entry_identity",
+            new=AsyncMock(side_effect=IneproIdentityError),
+        ),
     ):
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
-                CONF_HOST: "192.0.2.13",
+                CONF_HOST: "192.168.68.85",
                 CONF_PORT: 1502,
                 CONF_TIMEOUT: 4,
             },
@@ -4377,13 +4680,16 @@ async def test_reconfigure_flow_rejects_identity_mismatch(
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "connection"
     assert result["errors"] == {"base": "invalid_identity"}
-    assert entry.data[CONF_HOST] == "192.0.2.15"
+    assert entry.data[CONF_HOST] == "192.168.68.80"
     assert entry.data[CONF_PORT] == 502
 
 
+@pytest.mark.parametrize(
+    "ignore_missing_translations",
+    [EDIT_SERIAL_BUS_DYNAMIC_CONFIG_FIELD_TRANSLATIONS],
+)
 async def test_reconfigure_flow_can_edit_shared_serial_bus(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Reconfigure should reuse the shared-bus edit flow for bus entries."""
     entry = MockConfigEntry(
@@ -4411,10 +4717,10 @@ async def test_reconfigure_flow_can_edit_shared_serial_bus(
                 },
                 {
                     CONF_FAMILY: MeterFamily.GROW.value,
-                    CONF_NAME: "080125100002",
+                    CONF_NAME: "080125260007",
                     CONF_VARIANT: "grow_800",
                     CONF_SLAVE_ID: 157,
-                    CONF_SERIAL_NUMBER: "080125100002",
+                    CONF_SERIAL_NUMBER: "080125260007",
                     "product_code": "0801",
                 },
             ],
@@ -4434,27 +4740,25 @@ async def test_reconfigure_flow_can_edit_shared_serial_bus(
         result = await hass.config_entries.flow.async_configure(
             result["flow_id"],
             user_input={
-                CONF_NAME: "Main RS485 Bus",
                 CONF_SERIAL_PORT: "COM6",
                 CONF_BAUDRATE: 19200,
                 CONF_BYTESIZE: 8,
                 CONF_PARITY: "N",
                 CONF_STOPBITS: 1,
                 CONF_TIMEOUT: 5,
-                CONF_SCAN_INTERVAL: 30,
                 "Modbus ID for 085125250008": 5,
-                "Modbus ID for 080125100002": 158,
+                "Modbus ID for 080125260007": 158,
             },
         )
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
-    assert entry.title == "Main RS485 Bus"
+    assert entry.title == "085125250008"
     assert entry.version == 5
     assert entry.data[CONF_SERIAL_PORT] == "COM6"
     assert entry.data[CONF_BAUDRATE] == 19200
     assert entry.data[CONF_PARITY] == "N"
-    assert entry.data[CONF_SCAN_INTERVAL] == 30
+    assert entry.data[CONF_SCAN_INTERVAL] == 15
     assert entry.data[CONF_METERS] == [
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
@@ -4470,16 +4774,15 @@ async def test_reconfigure_flow_can_edit_shared_serial_bus(
         ),
         _expected_bus_meter(
             family=MeterFamily.GROW.value,
-            name="080125100002",
+            name="080125260007",
             variant="grow_800",
             slave_id=158,
             serial_port="COM6",
             timeout=5,
-            serial_number="080125100002",
+            serial_number="080125260007",
             product_code="0801",
             baudrate=19200,
             parity="N",
         ),
     ]
     schedule_reload.assert_called_once_with(entry.entry_id)
-

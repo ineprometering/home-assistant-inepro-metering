@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+from inepro_metering.const import MeterFamily, TransportType
 import pytest
-
-from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers import device_registry as dr
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.inepro_metering import (
     EXC_WIFI_CREDENTIALS_NOT_LOADED,
@@ -35,7 +32,11 @@ from custom_components.inepro_metering.const import (
     DEFAULT_STOPBITS,
     DOMAIN,
 )
-from inepro_metering.const import MeterFamily, TransportType
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import device_registry as dr
+
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
 class _FakeCoordinator:
@@ -47,25 +48,23 @@ class _FakeCoordinator:
 
 
 async def test_setup_entry_uses_runtime_data_and_service_survives_unload(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Config entries should keep runtime data on the entry and keep services loaded."""
-    del enable_custom_integrations
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="075625100001",
-        unique_id="075625100001",
+        title="075625480002",
+        unique_id="075625480002",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_VARIANT: "grow_750",
             CONF_TRANSPORT: TransportType.TCP_ETHERNET.value,
             CONF_SLAVE_ID: 1,
             CONF_TIMEOUT: 3,
-            "host": "192.0.2.15",
+            "host": "192.168.68.80",
             "port": 502,
             "scan_interval": DEFAULT_SCAN_INTERVAL,
-            CONF_SERIAL_NUMBER: "075625100001",
+            CONF_SERIAL_NUMBER: "075625480002",
         },
         version=5,
     )
@@ -105,8 +104,8 @@ async def test_setup_entry_uses_runtime_data_and_service_survives_unload(
             DOMAIN,
             SERVICE_SET_WIFI_CREDENTIALS,
             {
-                "serial_number": "075625100001",
-                "ssid": "ExampleNet",
+                "serial_number": "075625480002",
+                "ssid": "IneproLab",
                 "password": "secret",
             },
             blocking=True,
@@ -114,10 +113,12 @@ async def test_setup_entry_uses_runtime_data_and_service_survives_unload(
     err = exc_info.value
     assert err.translation_domain == DOMAIN
     assert err.translation_key == EXC_WIFI_CREDENTIALS_NOT_LOADED
-    assert err.translation_placeholders == {"serial_number": "075625100001"}
+    assert err.translation_placeholders == {"serial_number": "075625480002"}
 
 
-async def test_async_remove_config_entry_device_allows_only_stale_bus_devices(hass) -> None:
+async def test_async_remove_config_entry_device_allows_only_stale_bus_devices(
+    hass: HomeAssistant,
+) -> None:
     """Device removal should stay blocked for current meters and allow stale leftovers."""
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -144,10 +145,10 @@ async def test_async_remove_config_entry_device_allows_only_stale_bus_devices(ha
                 },
                 {
                     CONF_FAMILY: MeterFamily.GROW.value,
-                    "name": "075625100001",
+                    "name": "075625480002",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    CONF_SERIAL_NUMBER: "075625100001",
+                    CONF_SERIAL_NUMBER: "075625480002",
                     "product_code": "0756",
                 },
             ],
@@ -163,7 +164,7 @@ async def test_async_remove_config_entry_device_allows_only_stale_bus_devices(ha
     )
     secondary_device = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, "075625100001")},
+        identifiers={(DOMAIN, "075625480002")},
     )
     stale_device = device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,

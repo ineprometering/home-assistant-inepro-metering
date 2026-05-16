@@ -1,24 +1,28 @@
 """Select platform for Inepro Metering configuration registers."""
 
-from __future__ import annotations
+from inepro_metering.gateway_settings import (
+    GatewaySettingDescription,
+    get_gateway_settings,
+)
+from inepro_metering.settings import WritableSettingDescription, get_writable_settings
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo, EntityCategory
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
-from inepro_metering.gateway_settings import GatewaySettingDescription, get_gateway_settings
-from inepro_metering.settings import WritableSettingDescription, get_writable_settings
 
 from .const import CONF_FAMILY, CONF_SLAVE_ID, CONF_VARIANT, MANUFACTURER
 from .coordinator import IneproMeteringCoordinator, IneproSerialBusCoordinator
-from .device_identity import (
-    configured_entry_serial,
-    meter_device_identifier,
+from .device_identity import configured_entry_serial, meter_device_identifier
+from .entry_data import (
+    ConfiguredMeter,
+    build_meter_key,
+    get_configured_meters,
+    is_bus_entry,
 )
-from .entry_data import ConfiguredMeter, build_meter_key, get_configured_meters, is_bus_entry
 from .gateway_support import (
     IneproGatewayEntity,
     downstream_meter_via_device,
@@ -30,7 +34,7 @@ from .models import MeterProfile, get_profile
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Inepro Metering selects from a config entry."""
     coordinator = entry.runtime_data
@@ -42,9 +46,9 @@ async def async_setup_entry(
             for setting in get_gateway_settings(entity_platform="select")
         )
 
-    if is_bus_entry(entry.data):
+    if is_bus_entry(dict(entry.data)):
         bus_coordinator: IneproSerialBusCoordinator = coordinator
-        configured_meters = get_configured_meters(entry.data, title=entry.title)
+        configured_meters = get_configured_meters(dict(entry.data), title=entry.title)
         primary_meter = configured_meters[0] if configured_meters else None
 
         for meter in configured_meters:
@@ -109,7 +113,11 @@ class IneproGatewaySelect(
         if actual_option is not None and self._optimistic_option == actual_option:
             self._optimistic_option = None
 
-        return self._optimistic_option if self._optimistic_option is not None else actual_option
+        return (
+            self._optimistic_option
+            if self._optimistic_option is not None
+            else actual_option
+        )
 
     async def async_select_option(self, option: str) -> None:
         """Write one dropdown choice back to the gateway."""
@@ -119,7 +127,7 @@ class IneproGatewaySelect(
         try:
             await self.coordinator.async_write_gateway_setting(
                 setting_key=self._setting.key,
-                value=option,
+                value=normalized_option,
             )
             await self.coordinator.async_request_refresh()
         except Exception:
@@ -158,11 +166,13 @@ class IneproWritableSelect(
     @property
     def device_info(self) -> DeviceInfo:
         """Return the shared device information."""
-        meter = self.coordinator.data.meter if self.coordinator.data is not None else None
+        meter = (
+            self.coordinator.data.meter if self.coordinator.data is not None else None
+        )
         serial_number = (
             None if meter is None else meter.identity.device_serial
         ) or configured_entry_serial(self._entry)
-        return DeviceInfo(
+        device_info = DeviceInfo(
             identifiers={
                 meter_device_identifier(
                     self._entry,
@@ -184,8 +194,11 @@ class IneproWritableSelect(
             serial_number=serial_number,
             sw_version=None if meter is None else meter.firmware.software_version,
             hw_version=None if meter is None else meter.firmware.hardware_version,
-            via_device=downstream_meter_via_device(self._entry),
         )
+        via_device = downstream_meter_via_device(self._entry)
+        if via_device is not None:
+            device_info["via_device"] = via_device
+        return device_info
 
     @property
     def current_option(self) -> str | None:
@@ -199,7 +212,11 @@ class IneproWritableSelect(
         if actual_option is not None and self._optimistic_option == actual_option:
             self._optimistic_option = None
 
-        return self._optimistic_option if self._optimistic_option is not None else actual_option
+        return (
+            self._optimistic_option
+            if self._optimistic_option is not None
+            else actual_option
+        )
 
     async def async_select_option(self, option: str) -> None:
         """Write one dropdown choice back to the meter."""
@@ -211,7 +228,7 @@ class IneproWritableSelect(
                 profile=self._profile,
                 slave_id=int(self._entry.data[CONF_SLAVE_ID]),
                 setting_key=self._setting.key,
-                value=option,
+                value=normalized_option,
             )
             await self.coordinator.async_request_refresh()
         except Exception:
@@ -275,7 +292,7 @@ class IneproWritableBusSelect(
         serial_number = (
             None if meter is None else meter.identity.device_serial
         ) or self._meter.serial_number
-        return DeviceInfo(
+        device_info = DeviceInfo(
             identifiers={
                 meter_device_identifier(
                     self._entry,
@@ -298,8 +315,11 @@ class IneproWritableBusSelect(
             serial_number=serial_number,
             sw_version=None if meter is None else meter.firmware.software_version,
             hw_version=None if meter is None else meter.firmware.hardware_version,
-            via_device=downstream_meter_via_device(self._entry),
         )
+        via_device = downstream_meter_via_device(self._entry)
+        if via_device is not None:
+            device_info["via_device"] = via_device
+        return device_info
 
     @property
     def available(self) -> bool:
@@ -320,7 +340,11 @@ class IneproWritableBusSelect(
         if actual_option is not None and self._optimistic_option == actual_option:
             self._optimistic_option = None
 
-        return self._optimistic_option if self._optimistic_option is not None else actual_option
+        return (
+            self._optimistic_option
+            if self._optimistic_option is not None
+            else actual_option
+        )
 
     async def async_select_option(self, option: str) -> None:
         """Write one dropdown choice back to this bus meter."""
@@ -332,7 +356,7 @@ class IneproWritableBusSelect(
                 profile=self._profile,
                 slave_id=self._meter.slave_id,
                 setting_key=self._setting.key,
-                value=option,
+                value=normalized_option,
             )
             await self.coordinator.async_request_refresh()
         except Exception:

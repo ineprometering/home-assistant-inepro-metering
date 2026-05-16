@@ -1,16 +1,17 @@
 """Schema builders for the Inepro Metering config flow."""
 
-from __future__ import annotations
+from collections.abc import Sequence
+from typing import Any, cast
 
-from typing import Any
-
+from inepro_metering.routes import describe_route
 import voluptuous as vol
 
-from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_SCAN_INTERVAL, CONF_TIMEOUT
+from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TIMEOUT
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
@@ -38,8 +39,8 @@ from .const import (
     CONF_BYTESIZE,
     CONF_DEVICE_KIND,
     CONF_DISCOVERED_GATEWAY,
-    CONF_GATEWAY_DISCOVERY_TARGET,
     CONF_FAMILY,
+    CONF_GATEWAY_DISCOVERY_TARGET,
     CONF_GATEWAY_SETUP_METHOD,
     CONF_PARITY,
     CONF_ROUTE_PURPOSE,
@@ -50,15 +51,13 @@ from .const import (
     CONF_TRANSPORT,
     CONF_VARIANT,
     DEFAULT_BAUDRATE,
-    DEFAULT_BLUETOOTH_SCAN_INTERVAL,
-    DEFAULT_BLUETOOTH_TIMEOUT,
     DEFAULT_BLE_PROXY_HOST,
     DEFAULT_BLE_PROXY_PORT,
+    DEFAULT_BLUETOOTH_TIMEOUT,
     DEFAULT_BYTESIZE,
     DEFAULT_GATEWAY_SCAN_SLAVE_ID_END,
     DEFAULT_PARITY,
     DEFAULT_PORT,
-    DEFAULT_SCAN_INTERVAL,
     DEFAULT_SLAVE_ID,
     DEFAULT_SLAVE_ID_END,
     DEFAULT_STOPBITS,
@@ -66,11 +65,11 @@ from .const import (
     DEVICE_KIND_GATEWAY,
     DEVICE_KIND_LABELS,
     DEVICE_KIND_METER,
+    FAMILY_LABELS,
     GATEWAY_SETUP_METHOD_MANUAL_IP,
     GATEWAY_SETUP_METHOD_SCAN_NETWORK,
     ROUTE_PURPOSE_ACTIVE,
     ROUTE_PURPOSE_ONBOARDING,
-    FAMILY_LABELS,
     SETUP_METHOD_MANUAL,
     SETUP_METHOD_SCAN_BLUETOOTH,
     SETUP_METHOD_SCAN_SERIAL,
@@ -89,10 +88,27 @@ from .entry_data import (
     ConfiguredMeter,
     ConfiguredRoute,
     build_route_key,
-    describe_route,
     get_bus_route_for_meter,
 )
 from .models import MeterProfile
+
+
+def _select_selector_config(
+    *,
+    options: Any,
+    **kwargs: Any,
+) -> SelectSelectorConfig:
+    """Return a typed select-selector config for dynamic option mappings."""
+    return cast(
+        SelectSelectorConfig,
+        {
+            "options": cast(
+                Sequence[SelectOptionDict] | Sequence[str],
+                options,
+            ),
+            **kwargs,
+        },
+    )
 
 
 def build_device_kind_schema() -> vol.Schema:
@@ -103,7 +119,7 @@ def build_device_kind_schema() -> vol.Schema:
                 CONF_DEVICE_KIND,
                 default=DEVICE_KIND_METER,
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": device_kind,
@@ -120,14 +136,14 @@ def build_device_kind_schema() -> vol.Schema:
 
 
 def build_family_schema(
-    supported_families: list[MeterFamily],
+    supported_families: Sequence[MeterFamily],
     default_family: MeterFamily,
 ) -> vol.Schema:
     """Build the meter family selection form."""
     return vol.Schema(
         {
             vol.Required(CONF_FAMILY, default=default_family.value): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": family_option.value,
@@ -150,7 +166,7 @@ def build_setup_method_schema() -> vol.Schema:
                 CONF_SETUP_METHOD,
                 default=SETUP_METHOD_MANUAL,
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": SETUP_METHOD_MANUAL,
@@ -184,7 +200,7 @@ def build_gateway_setup_method_schema() -> vol.Schema:
                 CONF_GATEWAY_SETUP_METHOD,
                 default=GATEWAY_SETUP_METHOD_SCAN_NETWORK,
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": GATEWAY_SETUP_METHOD_SCAN_NETWORK,
@@ -221,11 +237,8 @@ def build_model_schema(
     """Build the meter model selection form for one family."""
     return vol.Schema(
         {
-            vol.Optional(CONF_NAME): TextSelector(
-                TextSelectorConfig(type=TextSelectorType.TEXT)
-            ),
             vol.Required(CONF_VARIANT, default=default_variant): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": variant,
@@ -240,17 +253,6 @@ def build_model_schema(
                 NumberSelectorConfig(
                     min=1,
                     max=247,
-                    step=1,
-                    mode=NumberSelectorMode.BOX,
-                )
-            ),
-            vol.Required(
-                CONF_SCAN_INTERVAL,
-                default=DEFAULT_SCAN_INTERVAL,
-            ): NumberSelector(
-                NumberSelectorConfig(
-                    min=5,
-                    max=3600,
                     step=1,
                     mode=NumberSelectorMode.BOX,
                 )
@@ -293,7 +295,7 @@ def build_transport_schema(
                 CONF_TRANSPORT,
                 default=default_value,
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": UNSELECTED_TRANSPORT,
@@ -352,7 +354,7 @@ def build_connection_schema(
                     CONF_PARITY,
                     default=user_value(user_input, CONF_PARITY, DEFAULT_PARITY),
                 ): SelectSelector(
-                    SelectSelectorConfig(
+                    _select_selector_config(
                         options=[
                             {"value": "N", "label": "None"},
                             {"value": "E", "label": "Even"},
@@ -497,9 +499,7 @@ def build_bluetooth_discovered_schema(
 ) -> vol.Schema:
     """Build the form schema for selecting a discovered Bluetooth meter."""
     default_meter = (
-        bluetooth_meter_key(discovered_meters[0])
-        if discovered_meters
-        else ""
+        bluetooth_meter_key(discovered_meters[0]) if discovered_meters else ""
     )
     return vol.Schema(
         {
@@ -511,7 +511,7 @@ def build_bluetooth_discovered_schema(
                     default_meter,
                 ),
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": bluetooth_meter_key(discovered_meter),
@@ -533,9 +533,7 @@ def build_add_route_bluetooth_discovered_schema(
 ) -> vol.Schema:
     """Build the form schema for selecting a discovered Bluetooth route."""
     default_meter = (
-        bluetooth_meter_key(discovered_meters[0])
-        if discovered_meters
-        else ""
+        bluetooth_meter_key(discovered_meters[0]) if discovered_meters else ""
     )
     return vol.Schema(
         {
@@ -547,7 +545,7 @@ def build_add_route_bluetooth_discovered_schema(
                     default_meter,
                 ),
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": bluetooth_meter_key(discovered_meter),
@@ -616,21 +614,6 @@ def bluetooth_meter_settings_schema(
                 mode=NumberSelectorMode.BOX,
             )
         ),
-        vol.Required(
-            CONF_SCAN_INTERVAL,
-            default=user_value(
-                user_input,
-                CONF_SCAN_INTERVAL,
-                DEFAULT_BLUETOOTH_SCAN_INTERVAL,
-            ),
-        ): NumberSelector(
-            NumberSelectorConfig(
-                min=5,
-                max=3600,
-                step=1,
-                mode=NumberSelectorMode.BOX,
-            )
-        ),
     }
 
 
@@ -668,7 +651,7 @@ def build_serial_scan_schema(user_input: dict[str, Any] | None) -> vol.Schema:
                 CONF_PARITY,
                 default=user_value(user_input, CONF_PARITY, DEFAULT_PARITY),
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {"value": "N", "label": "None"},
                         {"value": "E", "label": "Even"},
@@ -721,30 +704,16 @@ def build_serial_scan_schema(user_input: dict[str, Any] | None) -> vol.Schema:
                     mode=NumberSelectorMode.BOX,
                 )
             ),
-            vol.Required(
-                CONF_SCAN_INTERVAL,
-                default=user_value(user_input, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-            ): NumberSelector(
-                NumberSelectorConfig(
-                    min=5,
-                    max=3600,
-                    step=1,
-                    mode=NumberSelectorMode.BOX,
-                )
-            ),
         }
     )
 
 
 def build_discovered_serial_schema(
     discovered_meters: tuple[DiscoveredGrowMeter, ...],
-    *,
-    scan_interval_default: int,
 ) -> vol.Schema:
     """Build the form schema for selecting one or more discovered serial meters."""
     default_meter_keys = [
-        discovered_meter_key(discovered_meter)
-        for discovered_meter in discovered_meters
+        discovered_meter_key(discovered_meter) for discovered_meter in discovered_meters
     ]
     return vol.Schema(
         {
@@ -752,7 +721,7 @@ def build_discovered_serial_schema(
                 CONF_DISCOVERED_METERS,
                 default=default_meter_keys,
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": discovered_meter_key(discovered_meter),
@@ -762,17 +731,6 @@ def build_discovered_serial_schema(
                     ],
                     multiple=True,
                     mode=SelectSelectorMode.LIST,
-                )
-            ),
-            vol.Required(
-                CONF_SCAN_INTERVAL,
-                default=scan_interval_default,
-            ): NumberSelector(
-                NumberSelectorConfig(
-                    min=5,
-                    max=3600,
-                    step=1,
-                    mode=NumberSelectorMode.BOX,
                 )
             ),
         }
@@ -790,7 +748,7 @@ def build_action_schema(
                 CONF_ACTION,
                 default=default_action,
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=action_options,
                     mode=SelectSelectorMode.DROPDOWN,
                 )
@@ -810,7 +768,7 @@ def build_select_meter_schema(
                 CONF_SELECTED_METER,
                 default=default_meter_key,
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=meter_options,
                     mode=SelectSelectorMode.DROPDOWN,
                 )
@@ -875,17 +833,6 @@ def build_gateway_scan_schema(user_input: dict[str, Any] | None) -> vol.Schema:
                     mode=NumberSelectorMode.BOX,
                 )
             ),
-            vol.Required(
-                CONF_SCAN_INTERVAL,
-                default=user_value(user_input, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-            ): NumberSelector(
-                NumberSelectorConfig(
-                    min=5,
-                    max=3600,
-                    step=1,
-                    mode=NumberSelectorMode.BOX,
-                )
-            ),
         }
     )
 
@@ -896,9 +843,7 @@ def build_discovered_gateway_schema(
 ) -> vol.Schema:
     """Build the form schema for selecting one discovered TCP gateway."""
     default_gateway = (
-        _discovered_gateway_key(discovered_gateways[0])
-        if discovered_gateways
-        else ""
+        _discovered_gateway_key(discovered_gateways[0]) if discovered_gateways else ""
     )
     return vol.Schema(
         {
@@ -910,7 +855,7 @@ def build_discovered_gateway_schema(
                     default_gateway,
                 ),
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": _discovered_gateway_key(discovered_gateway),
@@ -949,7 +894,7 @@ def build_add_route_schema(
                 CONF_TRANSPORT,
                 default=user_value(user_input, CONF_TRANSPORT, default_transport),
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=route_options,
                     mode=SelectSelectorMode.DROPDOWN,
                 )
@@ -966,9 +911,11 @@ def build_add_route_purpose_schema(
         {
             vol.Required(
                 CONF_ROUTE_PURPOSE,
-                default=user_value(user_input, CONF_ROUTE_PURPOSE, ROUTE_PURPOSE_ONBOARDING),
+                default=user_value(
+                    user_input, CONF_ROUTE_PURPOSE, ROUTE_PURPOSE_ONBOARDING
+                ),
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": ROUTE_PURPOSE_ONBOARDING,
@@ -1039,7 +986,7 @@ def build_add_route_connection_schema(
                     CONF_PARITY,
                     default=user_value(user_input, CONF_PARITY, DEFAULT_PARITY),
                 ): SelectSelector(
-                    SelectSelectorConfig(
+                    _select_selector_config(
                         options=[
                             {"value": "N", "label": "None"},
                             {"value": "E", "label": "Even"},
@@ -1155,7 +1102,7 @@ def build_switch_route_schema(
                 CONF_SELECTED_ROUTE,
                 default=default_route,
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {
                             "value": build_route_key(route),
@@ -1170,38 +1117,14 @@ def build_switch_route_schema(
     )
 
 
-def build_update_polling_schema(default_scan_interval: int) -> vol.Schema:
-    """Build the form for updating only the polling interval."""
-    return vol.Schema(
-        {
-            vol.Required(
-                CONF_SCAN_INTERVAL,
-                default=default_scan_interval,
-            ): NumberSelector(
-                NumberSelectorConfig(
-                    min=5,
-                    max=3600,
-                    step=1,
-                    mode=NumberSelectorMode.BOX,
-                )
-            )
-        }
-    )
-
-
 def build_edit_serial_bus_schema(
     entry_data: dict[str, Any],
-    entry_title: str,
     configured_meters: tuple[ConfiguredMeter, ...],
     user_input: dict[str, Any] | None,
 ) -> vol.Schema:
     """Build the form schema for editing a shared Modbus bus entry."""
     transport = TransportType(entry_data[CONF_TRANSPORT])
     schema: dict[vol.Marker, Any] = {
-        vol.Required(
-            CONF_NAME,
-            default=user_value(user_input, CONF_NAME, entry_title),
-        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         vol.Required(
             CONF_TIMEOUT,
             default=user_value(
@@ -1213,21 +1136,6 @@ def build_edit_serial_bus_schema(
             NumberSelectorConfig(
                 min=1,
                 max=30,
-                step=1,
-                mode=NumberSelectorMode.BOX,
-            )
-        ),
-        vol.Required(
-            CONF_SCAN_INTERVAL,
-            default=user_value(
-                user_input,
-                CONF_SCAN_INTERVAL,
-                int(entry_data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)),
-            ),
-        ): NumberSelector(
-            NumberSelectorConfig(
-                min=5,
-                max=3600,
                 step=1,
                 mode=NumberSelectorMode.BOX,
             )
@@ -1276,9 +1184,11 @@ def build_edit_serial_bus_schema(
                 ),
                 vol.Required(
                     CONF_PARITY,
-                    default=user_value(user_input, CONF_PARITY, entry_data[CONF_PARITY]),
+                    default=user_value(
+                        user_input, CONF_PARITY, entry_data[CONF_PARITY]
+                    ),
                 ): SelectSelector(
-                    SelectSelectorConfig(
+                    _select_selector_config(
                         options=[
                             {"value": "N", "label": "None"},
                             {"value": "E", "label": "Even"},
@@ -1395,21 +1305,6 @@ def build_update_connection_schema(
                 mode=NumberSelectorMode.BOX,
             )
         ),
-        vol.Required(
-            CONF_SCAN_INTERVAL,
-            default=user_value(
-                user_input,
-                CONF_SCAN_INTERVAL,
-                int(entry_data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)),
-            ),
-        ): NumberSelector(
-            NumberSelectorConfig(
-                min=5,
-                max=3600,
-                step=1,
-                mode=NumberSelectorMode.BOX,
-            )
-        ),
     }
 
     if transport is TransportType.SERIAL:
@@ -1460,7 +1355,7 @@ def build_update_connection_schema(
                     entry_data[CONF_PARITY],
                 ),
             ): SelectSelector(
-                SelectSelectorConfig(
+                _select_selector_config(
                     options=[
                         {"value": "N", "label": "None"},
                         {"value": "E", "label": "Even"},
@@ -1601,21 +1496,6 @@ def build_serial_bus_scan_schema(
                 NumberSelectorConfig(
                     min=1,
                     max=247,
-                    step=1,
-                    mode=NumberSelectorMode.BOX,
-                )
-            ),
-            vol.Required(
-                CONF_SCAN_INTERVAL,
-                default=user_value(
-                    user_input,
-                    CONF_SCAN_INTERVAL,
-                    int(entry_data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)),
-                ),
-            ): NumberSelector(
-                NumberSelectorConfig(
-                    min=5,
-                    max=3600,
                     step=1,
                     mode=NumberSelectorMode.BOX,
                 )

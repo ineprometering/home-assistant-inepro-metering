@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import struct
 from datetime import timedelta
-from unittest.mock import patch
+import struct
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
-from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import CONF_SCAN_INTERVAL, CONF_TIMEOUT
-from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from inepro_metering.const import MeterFamily, TransportType
 
 from custom_components.inepro_metering.const import (
     CONF_BAUDRATE,
@@ -24,7 +22,22 @@ from custom_components.inepro_metering.const import (
     CONF_VARIANT,
     DOMAIN,
 )
-from inepro_metering.const import MeterFamily, TransportType
+from custom_components.inepro_metering.entry_data import ConfiguredMeter
+from custom_components.inepro_metering.models import get_profile
+from custom_components.inepro_metering.number import (
+    IneproWritableBusNumber,
+    IneproWritableNumber,
+)
+from custom_components.inepro_metering.select import (
+    IneproWritableBusSelect,
+    IneproWritableSelect,
+)
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import CONF_SCAN_INTERVAL, CONF_TIMEOUT
+from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
+
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
 def _encode_float(value: float) -> list[int]:
@@ -90,9 +103,10 @@ def _build_register_map(
 class FakeWritableModbusClient:
     """Fake Modbus client for one single-meter writable-settings entry."""
 
-    instances: list["FakeWritableModbusClient"] = []
+    instances: list[FakeWritableModbusClient] = []
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         self._registers = _build_register_map(
             serial_hi=0x2515,
             serial_lo=0x0002,
@@ -111,32 +125,40 @@ class FakeWritableModbusClient:
         self.instances.append(self)
 
     async def async_read_registers(self, register_type, address, count, slave_id):
+        """Return fake register values."""
         return [self._registers.get(address + offset, 0) for offset in range(count)]
 
     async def async_write_register(self, address, value, slave_id):
+        """Record a fake single-register write."""
         self.writes.append((slave_id, address, int(value)))
         self._registers[address] = int(value)
 
     async def async_close(self) -> None:
-        return None
+        """Close the fake client."""
+        return
 
 
 class FakeStaleAfterWriteModbusClient(FakeWritableModbusClient):
     """Fake client that returns one stale setting poll after a successful write."""
 
-    instances: list["FakeStaleAfterWriteModbusClient"] = []
+    instances: list[FakeStaleAfterWriteModbusClient] = []
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         super().__init__(config)
         self._stale_reads: dict[int, int] = {}
         self.instances.append(self)
 
     async def async_read_registers(self, register_type, address, count, slave_id):
+        """Return fake register values."""
         if count == 1 and address in self._stale_reads:
             return [self._stale_reads.pop(address)]
-        return await super().async_read_registers(register_type, address, count, slave_id)
+        return await super().async_read_registers(
+            register_type, address, count, slave_id
+        )
 
     async def async_write_register(self, address, value, slave_id):
+        """Record a fake single-register write."""
         previous = self._registers.get(address, 0)
         await super().async_write_register(address, value, slave_id)
         self._stale_reads[address] = previous
@@ -145,9 +167,10 @@ class FakeStaleAfterWriteModbusClient(FakeWritableModbusClient):
 class FakeWritableSerialBusModbusClient:
     """Fake Modbus client for writable settings on a multi-meter RTU bus."""
 
-    instances: list["FakeWritableSerialBusModbusClient"] = []
+    instances: list[FakeWritableSerialBusModbusClient] = []
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         self._registers_by_slave = {
             1: _build_register_map(
                 serial_hi=0x2515,
@@ -182,20 +205,220 @@ class FakeWritableSerialBusModbusClient:
         self.instances.append(self)
 
     async def async_read_registers(self, register_type, address, count, slave_id):
+        """Return fake register values."""
         registers = self._registers_by_slave[slave_id]
         return [registers.get(address + offset, 0) for offset in range(count)]
 
     async def async_write_register(self, address, value, slave_id):
+        """Record a fake single-register write."""
         self.writes.append((slave_id, address, int(value)))
         self._registers_by_slave[slave_id][address] = int(value)
 
     async def async_close(self) -> None:
-        return None
+        """Close the fake client."""
+        return
+
+
+async def test_single_meter_select_writes_normalized_value() -> None:
+    """Single-meter writable selects should use normalized values for state and I/O."""
+    profile = get_profile(MeterFamily.GROW.value, "grow_850")
+    coordinator = SimpleNamespace(
+        data=None,
+        async_write_setting=AsyncMock(),
+        async_request_refresh=AsyncMock(),
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Test Meter",
+        data={
+            CONF_FAMILY: MeterFamily.GROW.value,
+            CONF_VARIANT: "grow_850",
+            CONF_TRANSPORT: TransportType.SERIAL.value,
+            CONF_SLAVE_ID: 1,
+            CONF_SCAN_INTERVAL: 15,
+            CONF_SERIAL_PORT: "COM7",
+            CONF_BAUDRATE: 9600,
+            CONF_BYTESIZE: 8,
+            CONF_PARITY: "E",
+            CONF_STOPBITS: 1,
+            CONF_TIMEOUT: 3,
+        },
+    )
+    setting = SimpleNamespace(
+        key="backlight_mode",
+        name="Backlight mode",
+        resolved_options_by_value=lambda profile: {"button": "Button Activated"},
+        normalize_value=lambda profile, option: "button",
+    )
+    entity = IneproWritableSelect(coordinator, entry, profile, setting)
+    entity.async_write_ha_state = Mock()
+
+    await entity.async_select_option(" Button Activated ")
+
+    assert entity.current_option == "button"
+    coordinator.async_write_setting.assert_awaited_once_with(
+        profile=profile,
+        slave_id=1,
+        setting_key="backlight_mode",
+        value="button",
+    )
+
+
+async def test_bus_select_writes_normalized_value() -> None:
+    """Bus writable selects should use normalized values for state and I/O."""
+    profile = get_profile(MeterFamily.GROW.value, "grow_850")
+    coordinator = SimpleNamespace(
+        data=None,
+        async_write_setting=AsyncMock(),
+        async_request_refresh=AsyncMock(),
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Serial Bus",
+        data={
+            CONF_FAMILY: MeterFamily.GROW.value,
+            CONF_TRANSPORT: TransportType.SERIAL.value,
+            CONF_SCAN_INTERVAL: 15,
+            CONF_SERIAL_PORT: "COM7",
+            CONF_BAUDRATE: 9600,
+            CONF_BYTESIZE: 8,
+            CONF_PARITY: "E",
+            CONF_STOPBITS: 1,
+            CONF_TIMEOUT: 3,
+            CONF_METERS: [],
+        },
+    )
+    meter = ConfiguredMeter(
+        family=MeterFamily.GROW.value,
+        name="Bus Meter",
+        variant="grow_850",
+        slave_id=157,
+        serial_number="080125260007",
+    )
+    setting = SimpleNamespace(
+        key="backlight_mode",
+        name="Backlight mode",
+        resolved_options_by_value=lambda profile: {"button": "Button Activated"},
+        normalize_value=lambda profile, option: "button",
+    )
+    entity = IneproWritableBusSelect(coordinator, entry, meter, profile, setting)
+    entity.async_write_ha_state = Mock()
+
+    await entity.async_select_option(" Button Activated ")
+
+    assert entity.current_option == "button"
+    coordinator.async_write_setting.assert_awaited_once_with(
+        profile=profile,
+        slave_id=157,
+        setting_key="backlight_mode",
+        value="button",
+    )
+
+
+async def test_single_meter_number_writes_normalized_value() -> None:
+    """Single-meter writable numbers should use normalized values for state and I/O."""
+    profile = get_profile(MeterFamily.GROW.value, "grow_850")
+    coordinator = SimpleNamespace(
+        data=None,
+        async_write_setting=AsyncMock(),
+        async_request_refresh=AsyncMock(),
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Test Meter",
+        data={
+            CONF_FAMILY: MeterFamily.GROW.value,
+            CONF_VARIANT: "grow_850",
+            CONF_TRANSPORT: TransportType.SERIAL.value,
+            CONF_SLAVE_ID: 1,
+            CONF_SCAN_INTERVAL: 15,
+            CONF_SERIAL_PORT: "COM7",
+            CONF_BAUDRATE: 9600,
+            CONF_BYTESIZE: 8,
+            CONF_PARITY: "E",
+            CONF_STOPBITS: 1,
+            CONF_TIMEOUT: 3,
+        },
+    )
+    setting = SimpleNamespace(
+        key="backlight_timeout",
+        name="Backlight timeout",
+        native_min_value=0,
+        native_max_value=120,
+        native_step=1,
+        native_unit_of_measurement_for_profile=lambda profile: "s",
+        normalize_value=lambda profile, value: 12,
+    )
+    entity = IneproWritableNumber(coordinator, entry, profile, setting)
+    entity.async_write_ha_state = Mock()
+
+    await entity.async_set_native_value(12.2)
+
+    assert entity.native_value == 12.0
+    coordinator.async_write_setting.assert_awaited_once_with(
+        profile=profile,
+        slave_id=1,
+        setting_key="backlight_timeout",
+        value=12.0,
+    )
+
+
+async def test_bus_number_writes_normalized_value() -> None:
+    """Bus writable numbers should use normalized values for state and I/O."""
+    profile = get_profile(MeterFamily.GROW.value, "grow_850")
+    coordinator = SimpleNamespace(
+        data=None,
+        async_write_setting=AsyncMock(),
+        async_request_refresh=AsyncMock(),
+    )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Serial Bus",
+        data={
+            CONF_FAMILY: MeterFamily.GROW.value,
+            CONF_TRANSPORT: TransportType.SERIAL.value,
+            CONF_SCAN_INTERVAL: 15,
+            CONF_SERIAL_PORT: "COM7",
+            CONF_BAUDRATE: 9600,
+            CONF_BYTESIZE: 8,
+            CONF_PARITY: "E",
+            CONF_STOPBITS: 1,
+            CONF_TIMEOUT: 3,
+            CONF_METERS: [],
+        },
+    )
+    meter = ConfiguredMeter(
+        family=MeterFamily.GROW.value,
+        name="Bus Meter",
+        variant="grow_850",
+        slave_id=157,
+        serial_number="080125260007",
+    )
+    setting = SimpleNamespace(
+        key="backlight_timeout",
+        name="Backlight timeout",
+        native_min_value=0,
+        native_max_value=120,
+        native_step=1,
+        native_unit_of_measurement_for_profile=lambda profile: "s",
+        normalize_value=lambda profile, value: 12,
+    )
+    entity = IneproWritableBusNumber(coordinator, entry, meter, profile, setting)
+    entity.async_write_ha_state = Mock()
+
+    await entity.async_set_native_value(12.2)
+
+    assert entity.native_value == 12.0
+    coordinator.async_write_setting.assert_awaited_once_with(
+        profile=profile,
+        slave_id=157,
+        setting_key="backlight_timeout",
+        value=12.0,
+    )
 
 
 async def test_single_meter_display_settings_entities_expose_current_values(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Display settings should be shown through switches, selects, and sliders."""
     FakeWritableModbusClient.instances.clear()
@@ -226,7 +449,9 @@ async def test_single_meter_display_settings_entities_expose_current_values(
         await hass.async_block_till_done()
 
     assert entry.state is ConfigEntryState.LOADED
-    assert hass.states.get("select.test_meter_backlight_mode").state == "Button Activated"
+    assert (
+        hass.states.get("select.test_meter_backlight_mode").state == "Button Activated"
+    )
     assert hass.states.get("select.test_meter_backlight_level").state == "100%"
     assert (
         hass.states.get("select.test_meter_display_tariff_mode").state
@@ -238,13 +463,13 @@ async def test_single_meter_display_settings_entities_expose_current_values(
     assert float(hass.states.get("number.test_meter_backlight_timeout").state) == 5.0
     assert float(hass.states.get("number.test_meter_legal_lcd_cycle_time").state) == 5.0
     assert (
-        float(hass.states.get("number.test_meter_non_legal_lcd_cycle_time").state) == 10.0
+        float(hass.states.get("number.test_meter_non_legal_lcd_cycle_time").state)
+        == 10.0
     )
 
 
 async def test_single_meter_display_settings_write_registers_and_refresh(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Writes through HA setting entities should update the underlying registers."""
     FakeWritableModbusClient.instances.clear()
@@ -314,8 +539,7 @@ async def test_single_meter_display_settings_write_registers_and_refresh(
 
 
 async def test_single_meter_setting_write_ignores_one_stale_follow_up_poll(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A stale poll immediately after a verified write should not revert the UI value."""
     FakeStaleAfterWriteModbusClient.instances.clear()
@@ -365,8 +589,7 @@ async def test_single_meter_setting_write_ignores_one_stale_follow_up_poll(
 
 
 async def test_serial_bus_display_setting_write_targets_correct_slave(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Bus setting writes should go to the addressed RTU slave."""
     FakeWritableSerialBusModbusClient.instances.clear()
@@ -392,10 +615,10 @@ async def test_serial_bus_display_setting_write_targets_correct_slave(
                     "product_code": "0851",
                 },
                 {
-                    "name": "080125100002",
+                    "name": "080125260007",
                     CONF_VARIANT: "grow_800",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "080125100002",
+                    "serial_number": "080125260007",
                     "product_code": "0801",
                 },
             ],
@@ -411,12 +634,12 @@ async def test_serial_bus_display_setting_write_targets_correct_slave(
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
 
-        assert hass.states.get("select.080125100002_backlight_level").state == "60%"
+        assert hass.states.get("select.080125260007_backlight_level").state == "60%"
         await hass.services.async_call(
             "select",
             "select_option",
             {
-                "entity_id": "select.080125100002_backlight_level",
+                "entity_id": "select.080125260007_backlight_level",
                 "option": "20%",
             },
             blocking=True,
@@ -425,4 +648,4 @@ async def test_serial_bus_display_setting_write_targets_correct_slave(
 
     client = FakeWritableSerialBusModbusClient.instances[0]
     assert client.writes == [(157, 0x4171, 20)]
-    assert hass.states.get("select.080125100002_backlight_level").state == "20%"
+    assert hass.states.get("select.080125260007_backlight_level").state == "20%"

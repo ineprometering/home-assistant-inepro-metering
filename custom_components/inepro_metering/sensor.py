@@ -1,31 +1,37 @@
 """Sensor platform for Inepro Metering."""
 
-from __future__ import annotations
+from inepro_metering.runtime import VERSION_CRC_KEYS, format_meter_version_value
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import DeviceInfo, EntityCategory
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     CONF_FAMILY,
     CONF_TRANSPORT,
     CONF_VARIANT,
-    DOMAIN,
     FAMILY_LABELS,
     MANUFACTURER,
-    MeterFamily,
     TRANSPORT_LABELS,
+    MeterFamily,
     TransportType,
 )
-from .coordinator import IneproMeteringCoordinator, IneproSerialBusCoordinator, MeterCoordinatorData
-from .device_identity import (
-    configured_entry_serial,
-    meter_device_identifier,
+from .coordinator import (
+    IneproMeteringCoordinator,
+    IneproSerialBusCoordinator,
+    MeterCoordinatorData,
 )
-from .entry_data import ConfiguredMeter, build_meter_key, get_configured_meters, is_bus_entry
+from .device_identity import configured_entry_serial, meter_device_identifier
+from .entry_data import (
+    ConfiguredMeter,
+    build_meter_key,
+    get_configured_meters,
+    is_bus_entry,
+)
 from .gateway_support import (
     build_gateway_device_info,
     downstream_meter_via_device,
@@ -39,7 +45,6 @@ from .models import (
     get_profile,
     get_profile_for_variant,
 )
-from inepro_metering.runtime import VERSION_CRC_KEYS, format_meter_version_value
 
 MODBUS_DEVICE_INFO_SENSORS = (
     ("manufacturer_name", "Manufacturer Name"),
@@ -58,7 +63,7 @@ TCP_GATEWAY_INFO_SENSORS = (
 
 def _grow_error_attributes(
     readings: dict[str, str | int | float],
-) -> dict[str, str | list[str]] | None:
+) -> dict[str, object] | None:
     """Return decoded GROW error details for the raw error-code entity."""
     error_code = readings.get("error_code")
     summary = format_grow_error_summary(error_code)
@@ -75,16 +80,16 @@ def _grow_error_attributes(
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Inepro Metering sensors from a config entry."""
     coordinator = entry.runtime_data
     transport = TransportType(entry.data[CONF_TRANSPORT])
 
-    if is_bus_entry(entry.data):
+    if is_bus_entry(dict(entry.data)):
         bus_coordinator: IneproSerialBusCoordinator = coordinator
         entities: list[SensorEntity] = []
-        configured_meters = get_configured_meters(entry.data, title=entry.title)
+        configured_meters = get_configured_meters(dict(entry.data), title=entry.title)
         primary_meter = configured_meters[0] if configured_meters else None
 
         if entry_supports_gateway_management(entry):
@@ -228,12 +233,16 @@ async def async_setup_entry(
         ),
     ]
     entities.extend(
-        IneproDynamicInfoSensor(single_coordinator, entry, profile, field=field, name=name)
+        IneproDynamicInfoSensor(
+            single_coordinator, entry, profile, field=field, name=name
+        )
         for field, name in MODBUS_DEVICE_INFO_SENSORS
     )
     if entry_supports_gateway_management(entry):
         entities.extend(
-            IneproGatewayInfoSensor(single_coordinator, entry, profile, field=field, name=name)
+            IneproGatewayInfoSensor(
+                single_coordinator, entry, profile, field=field, name=name
+            )
             for field, name in TCP_GATEWAY_INFO_SENSORS
         )
     if profile.family == MeterFamily.GROW:
@@ -269,12 +278,14 @@ class IneproBaseEntity(CoordinatorEntity[IneproMeteringCoordinator], SensorEntit
     @property
     def device_info(self) -> DeviceInfo:
         """Return the shared device information."""
-        meter = self.coordinator.data.meter if self.coordinator.data is not None else None
+        meter = (
+            self.coordinator.data.meter if self.coordinator.data is not None else None
+        )
         serial_number = (
             None if meter is None else meter.identity.device_serial
         ) or configured_entry_serial(self._entry)
 
-        return DeviceInfo(
+        device_info = DeviceInfo(
             identifiers={
                 meter_device_identifier(
                     self._entry,
@@ -296,8 +307,11 @@ class IneproBaseEntity(CoordinatorEntity[IneproMeteringCoordinator], SensorEntit
             serial_number=serial_number,
             sw_version=None if meter is None else meter.firmware.software_version,
             hw_version=None if meter is None else meter.firmware.hardware_version,
-            via_device=downstream_meter_via_device(self._entry),
         )
+        via_device = downstream_meter_via_device(self._entry)
+        if via_device is not None:
+            device_info["via_device"] = via_device
+        return device_info
 
 
 class IneproDiagnosticEntity(IneproBaseEntity):
@@ -317,10 +331,11 @@ class IneproGatewayDiagnosticEntity(IneproDiagnosticEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Return the device information for the gateway endpoint."""
-        gateway = self.coordinator.data.gateway if self.coordinator.data is not None else None
+        gateway = (
+            self.coordinator.data.gateway if self.coordinator.data is not None else None
+        )
         return build_gateway_device_info(
             self._entry,
-            name=f"{self._entry.title} Gateway",
             gateway=gateway,
         )
 
@@ -474,7 +489,9 @@ class IneproErrorSummarySensor(IneproDiagnosticEntity):
         """Return the decoded GROW error summary."""
         if self.coordinator.data is None:
             return None
-        return format_grow_error_summary(self.coordinator.data.meter.readings.get("error_code"))
+        return format_grow_error_summary(
+            self.coordinator.data.meter.readings.get("error_code")
+        )
 
 
 class IneproRegisterSensor(IneproBaseEntity):
@@ -532,7 +549,10 @@ class IneproRegisterSensor(IneproBaseEntity):
 
         meter = self.coordinator.data.meter
         readings = meter.readings
-        if self._description.key == "error_code" and self._profile.family == MeterFamily.GROW:
+        if (
+            self._description.key == "error_code"
+            and self._profile.family == MeterFamily.GROW
+        ):
             return _grow_error_attributes(readings)
 
         if self._description.key not in VERSION_CRC_KEYS:
@@ -586,7 +606,7 @@ class IneproBusBaseEntity(CoordinatorEntity[IneproSerialBusCoordinator], SensorE
             None if meter is None else meter.identity.device_serial
         ) or self._meter.serial_number
 
-        return DeviceInfo(
+        device_info = DeviceInfo(
             identifiers={
                 meter_device_identifier(
                     self._entry,
@@ -609,8 +629,11 @@ class IneproBusBaseEntity(CoordinatorEntity[IneproSerialBusCoordinator], SensorE
             serial_number=serial_number,
             sw_version=None if meter is None else meter.firmware.software_version,
             hw_version=None if meter is None else meter.firmware.hardware_version,
-            via_device=downstream_meter_via_device(self._entry),
         )
+        via_device = downstream_meter_via_device(self._entry)
+        if via_device is not None:
+            device_info["via_device"] = via_device
+        return device_info
 
     @property
     def available(self) -> bool:
@@ -649,10 +672,11 @@ class IneproBusGatewayBaseEntity(
     @property
     def device_info(self) -> DeviceInfo:
         """Return the shared gateway device information."""
-        gateway = self.coordinator.data.gateway if self.coordinator.data is not None else None
+        gateway = (
+            self.coordinator.data.gateway if self.coordinator.data is not None else None
+        )
         return build_gateway_device_info(
             self._entry,
-            name=f"{self._entry.title} Gateway",
             gateway=gateway,
         )
 
@@ -691,7 +715,9 @@ class IneproBusStatusSensor(IneproBusDiagnosticEntity):
     def native_value(self) -> str:
         """Return online/offline status based on the last per-meter refresh result."""
         meter_data = self._meter_data
-        return "online" if meter_data is not None and meter_data.available else "offline"
+        return (
+            "online" if meter_data is not None and meter_data.available else "offline"
+        )
 
 
 class IneproBusGatewayInfoSensor(IneproBusGatewayBaseEntity):
@@ -927,7 +953,10 @@ class IneproBusRegisterSensor(IneproBusBaseEntity):
 
         meter = meter_data.meter
         readings = meter.readings
-        if self._description.key == "error_code" and self._profile.family == MeterFamily.GROW:
+        if (
+            self._description.key == "error_code"
+            and self._profile.family == MeterFamily.GROW
+        ):
             return _grow_error_attributes(readings)
 
         if self._description.key not in VERSION_CRC_KEYS:

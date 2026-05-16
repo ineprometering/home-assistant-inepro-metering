@@ -1,13 +1,14 @@
 """Shared HA helpers for TCP gateway configuration entities."""
 
-from __future__ import annotations
+from inepro_metering.gateway_settings import (
+    GatewaySettingState,
+    supports_gateway_management,
+)
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PORT
-from homeassistant.helpers.entity import DeviceInfo, EntityCategory
+from homeassistant.const import CONF_HOST, CONF_PORT, EntityCategory
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-
-from inepro_metering.gateway_settings import GatewaySettingState, supports_gateway_management
 
 from .const import CONF_SERIAL_NUMBER, CONF_TRANSPORT, MANUFACTURER, TransportType
 from .coordinator import (
@@ -16,10 +17,7 @@ from .coordinator import (
     IneproSerialBusCoordinator,
     SerialBusCoordinatorData,
 )
-from .device_identity import (
-    gateway_device_identifier,
-    gateway_serial_number,
-)
+from .device_identity import gateway_device_identifier, gateway_serial_number
 
 GatewayCoordinator = IneproMeteringCoordinator | IneproSerialBusCoordinator
 GatewayCoordinatorData = CoordinatorData | SerialBusCoordinatorData
@@ -56,7 +54,6 @@ def gateway_display_name(entry: ConfigEntry, *, gateway=None) -> str:
 def build_gateway_device_info(
     entry: ConfigEntry,
     *,
-    name: str,
     gateway,
 ) -> DeviceInfo:
     """Return a device-registry view for one TCP gateway endpoint."""
@@ -117,6 +114,5 @@ class IneproGatewayEntity(CoordinatorEntity[GatewayCoordinator]):
         """Return the gateway device information."""
         return build_gateway_device_info(
             self._entry,
-            name=f"{self._entry.title} Gateway",
             gateway=self.gateway,
         )

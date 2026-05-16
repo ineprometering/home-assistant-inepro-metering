@@ -10,7 +10,7 @@ Home Assistant domain is `inepro_metering`.
 ## Install
 
 ```bash
-pip install inepro-metering==0.1.1
+pip install inepro-metering==0.1.2
 ```
 
 ## Capabilities

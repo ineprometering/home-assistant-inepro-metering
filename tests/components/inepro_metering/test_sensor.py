@@ -5,15 +5,19 @@ from __future__ import annotations
 import struct
 from unittest.mock import patch
 
+from inepro_metering.const import MeterFamily, TransportType
+from inepro_metering.modbus import (
+    IneproDeviceIdentification,
+    IneproReadError,
+    IneproTcpGatewayInfo,
+)
+from inepro_metering.wifi import (
+    WIFI_APPLY_ADDRESS,
+    WIFI_ENABLE_ADDRESS,
+    WIFI_PASSWORD_ADDRESS,
+    WIFI_SSID_ADDRESS,
+)
 import pytest
-
-from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import CONF_SCAN_INTERVAL, CONF_TIMEOUT
-from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
-from homeassistant.exceptions import ServiceValidationError
-from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.update_coordinator import UpdateFailed
-from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.inepro_metering import (
     EXC_WIFI_CREDENTIALS_INVALID,
@@ -33,19 +37,19 @@ from custom_components.inepro_metering.const import (
     CONF_VARIANT,
     DOMAIN,
 )
-from custom_components.inepro_metering.coordinator import IneproMeteringCoordinator
-from inepro_metering.const import MeterFamily, TransportType
-from inepro_metering.modbus import (
-    IneproDeviceIdentification,
-    IneproReadError,
-    IneproTcpGatewayInfo,
+from custom_components.inepro_metering.coordinator import (
+    IneproMeteringCoordinator,
 )
-from inepro_metering.wifi import (
-    WIFI_APPLY_ADDRESS,
-    WIFI_ENABLE_ADDRESS,
-    WIFI_PASSWORD_ADDRESS,
-    WIFI_SSID_ADDRESS,
-)
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.const import CONF_SCAN_INTERVAL, CONF_TIMEOUT, UnitOfEnergy
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.update_coordinator import UpdateFailed
+
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 
 def _encode_float(value: float) -> list[int]:
@@ -94,10 +98,11 @@ def _register_map() -> dict[int, int]:
     add(0x503A, _encode_float(0.2))
     add(0x503C, _encode_float(24.5))
     add(0x6000, _encode_int32(9845))
-    add(0x600C, _encode_uint32(123456))
+    add(0x600C, _encode_uint32(12345))
     add(0x6018, _encode_uint32(2500))
     add(0x6030, _encode_uint32(4800))
     add(0x603C, _encode_uint32(300))
+    add(0x6048, [0x0001])
 
     return registers
 
@@ -179,11 +184,21 @@ def _register_map_grow_750() -> dict[int, int]:
     add(0x5048, _encode_float(0.0))
     add(0x504A, _encode_float(1.5))
     add(0x504C, _encode_float(0.0))
-    add(0x6000, _encode_int32(91))
-    add(0x600C, _encode_uint32(91))
-    add(0x6018, _encode_uint32(0))
+    add(0x6000, _encode_int32(-1234))
+    add(0x6006, _encode_int32(-100))
+    add(0x6008, _encode_int32(2000))
+    add(0x600A, _encode_int32(3000))
+    add(0x600C, _encode_uint32(91000))
+    add(0x6012, _encode_uint32(1111))
+    add(0x6014, _encode_uint32(2222))
+    add(0x6016, _encode_uint32(3333))
+    add(0x6018, _encode_uint32(7000))
+    add(0x601E, _encode_uint32(4444))
+    add(0x6020, _encode_uint32(5555))
+    add(0x6022, _encode_uint32(6666))
     add(0x6030, _encode_uint32(0))
     add(0x603C, _encode_uint32(0))
+    add(0x6048, [0x0002])
     add(0x1010, _encode_int32(0))
     add(0x1012, _encode_int32(0))
     add(0x1100, [0x0000])
@@ -251,12 +266,15 @@ class FakeModbusClient:
     """Very small fake Modbus client for coordinator setup tests."""
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         self._registers = _register_map()
 
     async def async_read_registers(self, register_type, address, count, slave_id):
+        """Return fake register values."""
         return [self._registers.get(address + offset, 0) for offset in range(count)]
 
     async def async_read_device_identification(self, slave_id):
+        """Return fake device identification."""
         return IneproDeviceIdentification(
             manufacturer_name="inepro Metering B.V.",
             product_name="879-3120",
@@ -264,13 +282,45 @@ class FakeModbusClient:
         )
 
     async def async_close(self) -> None:
-        return None
+        """Close the fake client."""
+        return
+
+
+class FakeGrow750ModbusClient(FakeModbusClient):
+    """Fake Modbus client for a three-phase GROW 750 meter."""
+
+    def __init__(self, config) -> None:
+        """Initialize the fake client."""
+        super().__init__(config)
+        self._registers = _register_map_grow_750()
+
+    async def async_read_device_identification(self, slave_id):
+        """Return fake device identification."""
+        return IneproDeviceIdentification(
+            manufacturer_name="inepro Metering B.V.",
+            product_name="879-3120",
+            version="V1.0.2744",
+        )
+
+
+class FakeGrow750EnergyReadFailureModbusClient(FakeGrow750ModbusClient):
+    """Fake three-phase GROW meter that rejects the first energy block."""
+
+    async def async_read_registers(self, register_type, address, count, slave_id):
+        """Raise for the first cumulative energy block."""
+        if address == 0x6000:
+            raise IneproReadError("energy block unavailable")
+        return await super().async_read_registers(
+            register_type, address, count, slave_id
+        )
 
 
 class FakeModbusClientUnknownCrc(FakeModbusClient):
     """Fake Modbus client that returns raw unknown CRC values."""
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
+        super().__init__(config)
         self._registers = _register_map_unknown_crc()
 
 
@@ -278,6 +328,8 @@ class FakeModbusClientFault(FakeModbusClient):
     """Fake Modbus client that returns an active GROW error bitfield."""
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
+        super().__init__(config)
         self._registers = _register_map_faulted()
 
 
@@ -285,6 +337,7 @@ class FakeGatewayModbusClient(FakeModbusClient):
     """Fake Modbus client for one single meter behind a TCP gateway."""
 
     async def async_read_tcp_gateway_info(self):
+        """Return fake TCP gateway information."""
         return IneproTcpGatewayInfo(
             device_type_code=330,
             device_type="TCP Gateway",
@@ -300,12 +353,15 @@ class FakeProModbusClient:
     """Fake Modbus client for PRO profile setup tests."""
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         self._registers = _register_map_pro_380()
 
     async def async_read_registers(self, register_type, address, count, slave_id):
+        """Return fake register values."""
         return [self._registers.get(address + offset, 0) for offset in range(count)]
 
     async def async_read_device_identification(self, slave_id):
+        """Return fake device identification."""
         return IneproDeviceIdentification(
             manufacturer_name="inepro Metering B.V.",
             product_name="PRO380",
@@ -313,13 +369,15 @@ class FakeProModbusClient:
         )
 
     async def async_close(self) -> None:
-        return None
+        """Close the fake client."""
+        return
 
 
 class FakeSerialBusModbusClient:
     """Fake Modbus client that returns different maps per RTU slave."""
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         self._registers_by_slave = {
             1: _register_map(),
             157: _register_map_grow_750(),
@@ -338,14 +396,17 @@ class FakeSerialBusModbusClient:
         }
 
     async def async_read_registers(self, register_type, address, count, slave_id):
+        """Return fake register values."""
         registers = self._registers_by_slave[slave_id]
         return [registers.get(address + offset, 0) for offset in range(count)]
 
     async def async_read_device_identification(self, slave_id):
+        """Return fake device identification."""
         return self._device_info_by_slave[slave_id]
 
     async def async_close(self) -> None:
-        return None
+        """Close the fake client."""
+        return
 
 
 class FakeWritableSerialBusModbusClient(FakeSerialBusModbusClient):
@@ -354,14 +415,17 @@ class FakeWritableSerialBusModbusClient(FakeSerialBusModbusClient):
     instances = []
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         super().__init__(config)
         self.writes = []
         self.instances.append(self)
 
     async def async_write_registers(self, address, values, slave_id):
+        """Record a fake multiple-register write."""
         self.writes.append(("registers", slave_id, address, tuple(values)))
 
     async def async_write_register(self, address, value, slave_id):
+        """Record a fake single-register write."""
         self.writes.append(("register", slave_id, address, value))
 
 
@@ -369,6 +433,7 @@ class FakeGatewayBusModbusClient(FakeSerialBusModbusClient):
     """Fake shared-bus client that also exposes TCP gateway metadata."""
 
     async def async_read_tcp_gateway_info(self):
+        """Return fake TCP gateway information."""
         return IneproTcpGatewayInfo(
             device_type_code=330,
             device_type="TCP Gateway",
@@ -384,6 +449,7 @@ class FakeGatewayBusPartialProModbusClient(FakeGatewayBusModbusClient):
     """Fake TCP gateway bus where one PRO meter rejects some status blocks."""
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         super().__init__(config)
         self._registers_by_slave = {
             27: _register_map_pro_380(),
@@ -397,41 +463,49 @@ class FakeGatewayBusPartialProModbusClient(FakeGatewayBusModbusClient):
         }
 
     async def async_read_registers(self, register_type, address, count, slave_id):
+        """Return fake register values."""
         if slave_id == 27 and address in {0x4015, 0x401B}:
             raise IneproReadError("status block unsupported")
-        return await super().async_read_registers(register_type, address, count, slave_id)
+        return await super().async_read_registers(
+            register_type, address, count, slave_id
+        )
 
 
 class FakeFlakyBluetoothProxyModbusClient(FakeModbusClient):
     """Fake BLE proxy client that can fail after a successful first update."""
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         super().__init__(config)
         self.fail_mode: str | None = None
 
     async def async_read_registers(self, register_type, address, count, slave_id):
+        """Return fake register values."""
         if self.fail_mode == "read_error":
             raise IneproReadError("transient ble proxy failure")
         if self.fail_mode == "short_block" and address == 0x5000:
             return [self._registers.get(address, 0)]
-        return await super().async_read_registers(register_type, address, count, slave_id)
+        return await super().async_read_registers(
+            register_type, address, count, slave_id
+        )
 
 
 class FakeUnsupportedDeviceIdentificationModbusClient(FakeModbusClient):
     """Fake meter that rejects Modbus Read Device Identification."""
 
     def __init__(self, config) -> None:
+        """Initialize the fake client."""
         super().__init__(config)
         self.device_identification_calls = 0
 
     async def async_read_device_identification(self, slave_id):
+        """Return fake device identification."""
         self.device_identification_calls += 1
         raise IneproReadError("device identification unsupported")
 
 
 async def test_setup_entry_creates_expected_sensor_entities(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A config entry should create coordinator-backed GROW entities."""
     entry = MockConfigEntry(
@@ -463,21 +537,39 @@ async def test_setup_entry_creates_expected_sensor_entities(
     assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get("sensor.test_meter_status").state == "online"
     assert float(hass.states.get("sensor.test_meter_total_active_power").state) == 3.2
-    forward_energy = hass.states.get("sensor.test_meter_forward_active_energy")
-    assert forward_energy is not None
-    assert float(forward_energy.state) == 123.456
-    assert forward_energy.attributes["device_class"] == "energy"
-    assert forward_energy.attributes["state_class"] == "total_increasing"
-    assert forward_energy.attributes["unit_of_measurement"] == "kWh"
+    assert (
+        float(hass.states.get("sensor.test_meter_forward_active_energy").state)
+        == 12.345
+    )
+    assert (
+        float(hass.states.get("sensor.test_meter_active_energy_import_total").state)
+        == 12.345
+    )
+    assert (
+        float(hass.states.get("sensor.test_meter_active_energy_export_total").state)
+        == 2.5
+    )
+    assert hass.states.get("sensor.test_meter_active_energy_import_l1") is None
+    assert hass.states.get("sensor.test_meter_active_energy_export_l1") is None
     assert hass.states.get("sensor.test_meter_serial_number").state == "25150002"
     assert hass.states.get("sensor.test_meter_product_code").state == "0850"
     assert hass.states.get("sensor.test_meter_error_code").state == "0000"
-    assert hass.states.get("sensor.test_meter_error_summary").state == "No critical errors"
-    assert hass.states.get("sensor.test_meter_manufacturer_name").state == "inepro Metering B.V."
+    assert (
+        hass.states.get("sensor.test_meter_error_summary").state == "No critical errors"
+    )
+    assert (
+        hass.states.get("sensor.test_meter_manufacturer_name").state
+        == "inepro Metering B.V."
+    )
     assert hass.states.get("sensor.test_meter_product_name").state == "879-3120"
     assert hass.states.get("sensor.test_meter_device_version").state == "V1.0.2744"
-    assert hass.states.get("sensor.test_meter_legal_software_version").state == "1.0.2536"
-    assert hass.states.get("sensor.test_meter_non_legal_software_version").state == "1.0.2536"
+    assert (
+        hass.states.get("sensor.test_meter_legal_software_version").state == "1.0.2536"
+    )
+    assert (
+        hass.states.get("sensor.test_meter_non_legal_software_version").state
+        == "1.0.2536"
+    )
     assert hass.states.get("sensor.test_meter_hardware_version").state == "2.0"
 
     device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, "085025150002")})
@@ -504,9 +596,136 @@ async def test_setup_entry_creates_expected_sensor_entities(
     assert non_legal.attributes["crc"] == "6A479857"
 
 
+async def test_grow_three_phase_energy_entities_use_import_export_metadata(
+    hass: HomeAssistant,
+) -> None:
+    """A supported three-phase GROW meter should expose per-phase energy entities."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Three Phase Meter",
+        data={
+            CONF_FAMILY: MeterFamily.GROW.value,
+            CONF_VARIANT: "grow_750",
+            CONF_TRANSPORT: TransportType.SERIAL.value,
+            CONF_SLAVE_ID: 1,
+            CONF_SCAN_INTERVAL: 15,
+            CONF_SERIAL_PORT: "COM7",
+            CONF_BAUDRATE: 9600,
+            CONF_BYTESIZE: 8,
+            CONF_PARITY: "E",
+            CONF_STOPBITS: 1,
+            CONF_TIMEOUT: 3,
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.inepro_metering.coordinator.IneproModbusClient",
+        FakeGrow750ModbusClient,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.LOADED
+
+    expected_energy_states = {
+        "active_energy_import_total": 91.0,
+        "active_energy_import_l1": 1.111,
+        "active_energy_import_l2": 2.222,
+        "active_energy_import_l3": 3.333,
+        "active_energy_export_total": 7.0,
+        "active_energy_export_l1": 4.444,
+        "active_energy_export_l2": 5.555,
+        "active_energy_export_l3": 6.666,
+    }
+    for key, expected_value in expected_energy_states.items():
+        state = hass.states.get(f"sensor.three_phase_meter_{key}")
+        assert state is not None
+        assert float(state.state) == pytest.approx(expected_value)
+        assert state.attributes["device_class"] == SensorDeviceClass.ENERGY
+        assert state.attributes["state_class"] == SensorStateClass.TOTAL_INCREASING
+        assert state.attributes["unit_of_measurement"] == UnitOfEnergy.KILO_WATT_HOUR
+
+    assert float(hass.states.get("sensor.three_phase_meter_active_power_l1").state) == 0
+    assert float(hass.states.get("sensor.three_phase_meter_active_power_l2").state) == 0
+    assert float(hass.states.get("sensor.three_phase_meter_active_power_l3").state) == 0
+    assert hass.states.get("sensor.three_phase_meter_reactive_energy_q1_l1") is None
+    assert hass.states.get("sensor.three_phase_meter_apparent_energy_l1") is None
+    assert hass.states.get("sensor.three_phase_meter_resettable_day_counter_l1") is None
+
+
+async def test_grow_signed_active_energy_decodes_as_int32(
+    hass: HomeAssistant,
+) -> None:
+    """Signed/net active-energy registers should decode as INT32 values."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Three Phase Meter",
+        data={
+            CONF_FAMILY: MeterFamily.GROW.value,
+            CONF_VARIANT: "grow_750",
+            CONF_TRANSPORT: TransportType.SERIAL.value,
+            CONF_SLAVE_ID: 1,
+            CONF_SCAN_INTERVAL: 15,
+            CONF_SERIAL_PORT: "COM7",
+            CONF_BAUDRATE: 9600,
+            CONF_BYTESIZE: 8,
+            CONF_PARITY: "E",
+            CONF_STOPBITS: 1,
+            CONF_TIMEOUT: 3,
+        },
+    )
+
+    with patch(
+        "custom_components.inepro_metering.coordinator.IneproModbusClient",
+        FakeGrow750ModbusClient,
+    ):
+        coordinator = IneproMeteringCoordinator(hass, entry)
+        data = await coordinator._async_update_data()
+
+    assert data.readings["active_energy_total"] == pytest.approx(-1.234)
+    assert data.readings["active_energy_l1"] == pytest.approx(-0.1)
+    assert data.readings["active_energy_l2"] == pytest.approx(2.0)
+    assert data.readings["active_energy_l3"] == pytest.approx(3.0)
+
+
+async def test_grow_energy_read_failure_does_not_report_zero(
+    hass: HomeAssistant,
+) -> None:
+    """Unavailable energy blocks should stay unknown instead of becoming zero."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Three Phase Meter",
+        data={
+            CONF_FAMILY: MeterFamily.GROW.value,
+            CONF_VARIANT: "grow_750",
+            CONF_TRANSPORT: TransportType.SERIAL.value,
+            CONF_SLAVE_ID: 1,
+            CONF_SCAN_INTERVAL: 15,
+            CONF_SERIAL_PORT: "COM7",
+            CONF_BAUDRATE: 9600,
+            CONF_BYTESIZE: 8,
+            CONF_PARITY: "E",
+            CONF_STOPBITS: 1,
+            CONF_TIMEOUT: 3,
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.inepro_metering.coordinator.IneproModbusClient",
+        FakeGrow750EnergyReadFailureModbusClient,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    energy_state = hass.states.get("sensor.three_phase_meter_active_energy_import_l1")
+    assert energy_state is not None
+    assert energy_state.state == "unknown"
+
+
 async def test_setup_entry_creates_expected_pro_sensor_entities(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A PRO config entry should create coordinator-backed serial Modbus entities."""
     entry = MockConfigEntry(
@@ -540,13 +759,9 @@ async def test_setup_entry_creates_expected_pro_sensor_entities(
     assert float(hass.states.get("sensor.pro_meter_voltage_l1").state) == 230.1
     assert float(hass.states.get("sensor.pro_meter_current_l3").state) == 10.2
     assert float(hass.states.get("sensor.pro_meter_total_active_power").state) == 6.789
-    assert float(hass.states.get("sensor.pro_meter_total_active_energy").state) == 1234.567
-    pro_forward_energy = hass.states.get("sensor.pro_meter_forward_active_energy")
-    assert pro_forward_energy is not None
-    assert float(pro_forward_energy.state) == 1200.125
-    assert pro_forward_energy.attributes["device_class"] == "energy"
-    assert pro_forward_energy.attributes["state_class"] == "total_increasing"
-    assert pro_forward_energy.attributes["unit_of_measurement"] == "kWh"
+    assert (
+        float(hass.states.get("sensor.pro_meter_total_active_energy").state) == 1234.567
+    )
     assert hass.states.get("sensor.pro_meter_serial_number").state == "12345678"
     assert hass.states.get("sensor.pro_meter_protocol_version").state == "2.18"
     assert hass.states.get("sensor.pro_meter_software_version").state == "2.18"
@@ -562,8 +777,7 @@ async def test_setup_entry_creates_expected_pro_sensor_entities(
 
 
 async def test_unknown_crc_is_reflected_in_version_strings(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Unknown CRCs should remain visible in firmware version strings."""
     entry = MockConfigEntry(
@@ -609,8 +823,7 @@ async def test_unknown_crc_is_reflected_in_version_strings(
 
 
 async def test_tcp_gateway_entry_exposes_gateway_diagnostic_sensors(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A TCP gateway route should expose the gateway metadata as diagnostic sensors."""
     entry = MockConfigEntry(
@@ -674,10 +887,8 @@ async def test_tcp_gateway_entry_exposes_gateway_diagnostic_sensors(
     assert meter_device.via_device_id == gateway_device.id
 
 
-
 async def test_grow_fault_error_summary_decodes_bitfield(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The GROW error summary sensor should decode active fault bits."""
     entry = MockConfigEntry(
@@ -722,8 +933,7 @@ async def test_grow_fault_error_summary_decodes_bitfield(
 
 
 async def test_serial_bus_entry_creates_multiple_meter_devices(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """One serial bus entry should expose multiple configured Inepro devices."""
     entry = MockConfigEntry(
@@ -748,10 +958,10 @@ async def test_serial_bus_entry_creates_multiple_meter_devices(
                     "product_code": "0851",
                 },
                 {
-                    "name": "000000000001",
+                    "name": "075625480002",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "000000000001",
+                    "serial_number": "075625480002",
                     "product_code": "0756",
                 },
             ],
@@ -769,21 +979,31 @@ async def test_serial_bus_entry_creates_multiple_meter_devices(
 
     assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get("sensor.085125250008_status").state == "online"
-    assert hass.states.get("sensor.000000000001_status").state == "online"
-    assert float(hass.states.get("sensor.085125250008_average_voltage_ln").state) == 230.5
-    assert hass.states.get("sensor.085125250008_error_summary").state == "No critical errors"
-    assert hass.states.get("sensor.000000000001_error_summary").state == "No critical errors"
-    assert float(hass.states.get("sensor.000000000001_average_voltage_ln").state) == 236.9
-    assert float(hass.states.get("sensor.000000000001_voltage_l1").state) == 236.7
-    assert hass.states.get("sensor.085125250008_product_name").state == "879-3121"
-    assert hass.states.get("sensor.000000000001_product_name").state == "879-3120"
-    assert hass.states.get("sensor.000000000001_device_version").state == "V1.0.2744"
+    assert hass.states.get("sensor.075625480002_status").state == "online"
     assert (
-        hass.states.get("sensor.000000000001_legal_software_version").state
+        float(hass.states.get("sensor.085125250008_average_voltage_ln").state) == 230.5
+    )
+    assert (
+        hass.states.get("sensor.085125250008_error_summary").state
+        == "No critical errors"
+    )
+    assert (
+        hass.states.get("sensor.075625480002_error_summary").state
+        == "No critical errors"
+    )
+    assert (
+        float(hass.states.get("sensor.075625480002_average_voltage_ln").state) == 236.9
+    )
+    assert float(hass.states.get("sensor.075625480002_voltage_l1").state) == 236.7
+    assert hass.states.get("sensor.085125250008_product_name").state == "879-3121"
+    assert hass.states.get("sensor.075625480002_product_name").state == "879-3120"
+    assert hass.states.get("sensor.075625480002_device_version").state == "V1.0.2744"
+    assert (
+        hass.states.get("sensor.075625480002_legal_software_version").state
         == "1.0 (B478FEE9)"
     )
-    assert hass.states.get("sensor.000000000001_wi_fi_support").state == "enabled"
-    assert hass.states.get("switch.000000000001_wi_fi_support").state == "on"
+    assert hass.states.get("sensor.075625480002_wi_fi_support").state == "enabled"
+    assert hass.states.get("switch.075625480002_wi_fi_support").state == "on"
     assert hass.states.get("switch.085125250008_wi_fi_support") is None
 
     device_registry = dr.async_get(hass)
@@ -791,7 +1011,7 @@ async def test_serial_bus_entry_creates_multiple_meter_devices(
         identifiers={(DOMAIN, "085125250008")}
     )
     three_phase = device_registry.async_get_device(
-        identifiers={(DOMAIN, "000000000001")}
+        identifiers={(DOMAIN, "075625480002")}
     )
     assert single_phase is not None
     assert three_phase is not None
@@ -802,8 +1022,7 @@ async def test_serial_bus_entry_creates_multiple_meter_devices(
 
 
 async def test_tcp_gateway_bus_entry_exposes_bus_level_gateway_device(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A shared TCP gateway bus should expose one separate gateway device and sensors."""
     entry = MockConfigEntry(
@@ -825,10 +1044,10 @@ async def test_tcp_gateway_bus_entry_exposes_bus_level_gateway_device(
                     "product_code": "0851",
                 },
                 {
-                    "name": "000000000001",
+                    "name": "075625480002",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "000000000001",
+                    "serial_number": "075625480002",
                     "product_code": "0756",
                 },
             ],
@@ -857,7 +1076,7 @@ async def test_tcp_gateway_bus_entry_exposes_bus_level_gateway_device(
         == "033023260024"
     )
     assert hass.states.get("sensor.085125250008_status").state == "online"
-    assert hass.states.get("sensor.000000000001_status").state == "online"
+    assert hass.states.get("sensor.075625480002_status").state == "online"
 
     gateway_device = dr.async_get(hass).async_get_device(
         identifiers={(DOMAIN, "033023260024")}
@@ -866,7 +1085,7 @@ async def test_tcp_gateway_bus_entry_exposes_bus_level_gateway_device(
         identifiers={(DOMAIN, "085125250008")}
     )
     three_phase = dr.async_get(hass).async_get_device(
-        identifiers={(DOMAIN, "000000000001")}
+        identifiers={(DOMAIN, "075625480002")}
     )
     assert gateway_device is not None
     assert gateway_device.identifiers == {(DOMAIN, "033023260024")}
@@ -881,8 +1100,7 @@ async def test_tcp_gateway_bus_entry_exposes_bus_level_gateway_device(
 
 
 async def test_tcp_gateway_bus_keeps_meter_online_when_status_blocks_fail(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A gateway meter should stay online when only optional status blocks fail."""
     entry = MockConfigEntry(
@@ -892,7 +1110,7 @@ async def test_tcp_gateway_bus_keeps_meter_online_when_status_blocks_fail(
             CONF_FAMILY: MeterFamily.PRO.value,
             CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
             CONF_SCAN_INTERVAL: 15,
-            "host": "192.0.2.10",
+            "host": "192.168.67.16",
             "port": 502,
             CONF_TIMEOUT: 10,
             CONF_METERS: [
@@ -919,25 +1137,24 @@ async def test_tcp_gateway_bus_keeps_meter_online_when_status_blocks_fail(
 
     assert entry.state is ConfigEntryState.LOADED
     assert hass.states.get("sensor.025715120327_status").state == "online"
-    assert float(hass.states.get("sensor.025715120327_total_active_power").state) == pytest.approx(
-        6.789
-    )
+    assert float(
+        hass.states.get("sensor.025715120327_total_active_power").state
+    ) == pytest.approx(6.789)
     assert hass.states.get("sensor.025715120327_error_code").state == "unknown"
 
 
 async def test_tcp_gateway_bus_entry_with_no_meters_loads_gateway_device(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """A verified TCP gateway with no meters should still load as a device."""
     entry = MockConfigEntry(
         domain=DOMAIN,
-        title="Inepro Gateway 203.0.113.20:502",
+        title="Inepro Gateway 192.168.68.85:502",
         data={
             CONF_FAMILY: MeterFamily.GROW.value,
             CONF_TRANSPORT: TransportType.TCP_GATEWAY.value,
             CONF_SCAN_INTERVAL: 15,
-            "host": "203.0.113.20",
+            "host": "192.168.68.85",
             "port": 502,
             CONF_TIMEOUT: 3,
             CONF_METERS: [],
@@ -974,7 +1191,7 @@ async def test_tcp_gateway_bus_entry_with_no_meters_loads_gateway_device(
 
 
 async def test_coordinator_skips_unsupported_modbus_device_identification(
-    hass,
+    hass: HomeAssistant,
 ) -> None:
     """Unsupported 43/14 metadata reads should not poison later polls."""
     entry = MockConfigEntry(
@@ -1010,7 +1227,7 @@ async def test_coordinator_skips_unsupported_modbus_device_identification(
 
 
 async def test_bluetooth_proxy_coordinator_keeps_last_data_on_transient_failures(
-    hass,
+    hass: HomeAssistant,
 ) -> None:
     """Transient Bluetooth proxy failures should reuse the last successful data."""
     entry = MockConfigEntry(
@@ -1022,10 +1239,10 @@ async def test_bluetooth_proxy_coordinator_keeps_last_data_on_transient_failures
             CONF_TRANSPORT: TransportType.BLUETOOTH_PROXY.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            "host": "203.0.113.10",
+            "host": "172.28.224.1",
             "port": 15026,
             "bluetooth_address": "80:F1:B2:58:DD:5A",
-            "bluetooth_name": "IM-000000000001",
+            "bluetooth_name": "IM-075625480002",
             CONF_TIMEOUT: 3,
         },
     )
@@ -1054,7 +1271,7 @@ async def test_bluetooth_proxy_coordinator_keeps_last_data_on_transient_failures
 
 
 async def test_bluetooth_proxy_coordinator_keeps_last_data_on_short_payloads(
-    hass,
+    hass: HomeAssistant,
 ) -> None:
     """Short malformed BLE payloads should not immediately blank a working meter."""
     entry = MockConfigEntry(
@@ -1066,10 +1283,10 @@ async def test_bluetooth_proxy_coordinator_keeps_last_data_on_short_payloads(
             CONF_TRANSPORT: TransportType.BLUETOOTH_PROXY.value,
             CONF_SLAVE_ID: 1,
             CONF_SCAN_INTERVAL: 15,
-            "host": "203.0.113.10",
+            "host": "172.28.224.1",
             "port": 15026,
             "bluetooth_address": "80:F1:B2:58:DD:5A",
-            "bluetooth_name": "IM-000000000001",
+            "bluetooth_name": "IM-075625480002",
             CONF_TIMEOUT: 3,
         },
     )
@@ -1091,8 +1308,7 @@ async def test_bluetooth_proxy_coordinator_keeps_last_data_on_short_payloads(
 
 
 async def test_set_wifi_credentials_service_writes_grow_register_sequence(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The Wi-Fi service should write SSID, password, then the apply command."""
     FakeWritableSerialBusModbusClient.instances.clear()
@@ -1118,10 +1334,10 @@ async def test_set_wifi_credentials_service_writes_grow_register_sequence(
                     "product_code": "0851",
                 },
                 {
-                    "name": "000000000001",
+                    "name": "075625480002",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "000000000001",
+                    "serial_number": "075625480002",
                     "product_code": "0756",
                 },
             ],
@@ -1140,8 +1356,8 @@ async def test_set_wifi_credentials_service_writes_grow_register_sequence(
             DOMAIN,
             "set_wifi_credentials",
             {
-                "serial_number": "000000000001",
-                "ssid": "ExampleNet",
+                "serial_number": "075625480002",
+                "ssid": "IneproLab",
                 "password": "secret",
                 "apply": True,
             },
@@ -1152,15 +1368,14 @@ async def test_set_wifi_credentials_service_writes_grow_register_sequence(
     assert len(client.writes) == 4
     assert client.writes[0] == ("register", 157, WIFI_ENABLE_ADDRESS, 1)
     assert client.writes[1][:3] == ("registers", 157, WIFI_SSID_ADDRESS)
-    assert client.writes[1][3][:5] == (0x4578, 0x616D, 0x706C, 0x654E, 0x6574)
+    assert client.writes[1][3][:5] == (0x496E, 0x6570, 0x726F, 0x4C61, 0x6200)
     assert client.writes[2][:3] == ("registers", 157, WIFI_PASSWORD_ADDRESS)
     assert client.writes[2][3][:3] == (0x7365, 0x6372, 0x6574)
     assert client.writes[3] == ("registers", 157, WIFI_APPLY_ADDRESS, (1,))
 
 
 async def test_set_wifi_credentials_service_rejects_unknown_serial_before_write(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Unknown serials should fail service validation before any meter write."""
     FakeWritableSerialBusModbusClient.instances.clear()
@@ -1179,10 +1394,10 @@ async def test_set_wifi_credentials_service_rejects_unknown_serial_before_write(
             CONF_TIMEOUT: 3,
             CONF_METERS: [
                 {
-                    "name": "000000000001",
+                    "name": "075625480002",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "000000000001",
+                    "serial_number": "075625480002",
                     "product_code": "0756",
                 },
             ],
@@ -1203,7 +1418,7 @@ async def test_set_wifi_credentials_service_rejects_unknown_serial_before_write(
                 "set_wifi_credentials",
                 {
                     "serial_number": "000000000000",
-                    "ssid": "ExampleNet",
+                    "ssid": "IneproLab",
                     "password": "secret",
                     "apply": False,
                 },
@@ -1219,8 +1434,7 @@ async def test_set_wifi_credentials_service_rejects_unknown_serial_before_write(
 
 
 async def test_set_wifi_credentials_service_rejects_invalid_credentials_before_write(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """Invalid credential data should become a translated validation error."""
     FakeWritableSerialBusModbusClient.instances.clear()
@@ -1239,10 +1453,10 @@ async def test_set_wifi_credentials_service_rejects_invalid_credentials_before_w
             CONF_TIMEOUT: 3,
             CONF_METERS: [
                 {
-                    "name": "000000000001",
+                    "name": "075625480002",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "000000000001",
+                    "serial_number": "075625480002",
                     "product_code": "0756",
                 },
             ],
@@ -1262,7 +1476,7 @@ async def test_set_wifi_credentials_service_rejects_invalid_credentials_before_w
                 DOMAIN,
                 "set_wifi_credentials",
                 {
-                    "serial_number": "000000000001",
+                    "serial_number": "075625480002",
                     "ssid": "",
                     "password": "secret",
                     "apply": False,
@@ -1279,8 +1493,7 @@ async def test_set_wifi_credentials_service_rejects_invalid_credentials_before_w
 
 
 async def test_wifi_support_switch_toggles_confirmed_register(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The Wi-Fi support switch should write the confirmed enable register."""
     FakeWritableSerialBusModbusClient.instances.clear()
@@ -1306,10 +1519,10 @@ async def test_wifi_support_switch_toggles_confirmed_register(
                     "product_code": "0851",
                 },
                 {
-                    "name": "000000000001",
+                    "name": "075625480002",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "000000000001",
+                    "serial_number": "075625480002",
                     "product_code": "0756",
                 },
             ],
@@ -1327,13 +1540,13 @@ async def test_wifi_support_switch_toggles_confirmed_register(
         await hass.services.async_call(
             SWITCH_DOMAIN,
             "turn_off",
-            {"entity_id": "switch.000000000001_wi_fi_support"},
+            {"entity_id": "switch.075625480002_wi_fi_support"},
             blocking=True,
         )
         await hass.services.async_call(
             SWITCH_DOMAIN,
             "turn_on",
-            {"entity_id": "switch.000000000001_wi_fi_support"},
+            {"entity_id": "switch.075625480002_wi_fi_support"},
             blocking=True,
         )
 
@@ -1345,8 +1558,7 @@ async def test_wifi_support_switch_toggles_confirmed_register(
 
 
 async def test_set_wifi_credentials_service_rejects_non_wifi_model(
-    hass,
-    enable_custom_integrations,
+    hass: HomeAssistant,
 ) -> None:
     """The Wi-Fi service should reject GROW models without Wi-Fi support."""
     FakeWritableSerialBusModbusClient.instances.clear()
@@ -1372,10 +1584,10 @@ async def test_set_wifi_credentials_service_rejects_non_wifi_model(
                     "product_code": "0851",
                 },
                 {
-                    "name": "000000000001",
+                    "name": "075625480002",
                     CONF_VARIANT: "grow_750",
                     CONF_SLAVE_ID: 157,
-                    "serial_number": "000000000001",
+                    "serial_number": "075625480002",
                     "product_code": "0756",
                 },
             ],
@@ -1396,7 +1608,7 @@ async def test_set_wifi_credentials_service_rejects_non_wifi_model(
                 "set_wifi_credentials",
                 {
                     "serial_number": "085125250008",
-                    "ssid": "ExampleNet",
+                    "ssid": "IneproLab",
                     "password": "secret",
                 },
                 blocking=True,

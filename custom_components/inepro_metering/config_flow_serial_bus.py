@@ -1,13 +1,12 @@
 """Shared Modbus bus helpers used by the Inepro Metering config and options flows."""
 
-from __future__ import annotations
-
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_SCAN_INTERVAL, CONF_TIMEOUT
 from homeassistant.data_entry_flow import FlowResult
 
+from .config_flow_protocols import IneproFlowProtocol
 from .config_flow_shared import CONFIG_ENTRY_VERSION, discovered_meter_key
 from .const import (
     CONF_BAUDRATE,
@@ -36,12 +35,14 @@ from .entry_data import (
 )
 
 
-def _meter_serials(meters: tuple[ConfiguredMeter, ...] | list[ConfiguredMeter]) -> set[str]:
+def _meter_serials(
+    meters: tuple[ConfiguredMeter, ...] | list[ConfiguredMeter],
+) -> set[str]:
     """Return known physical serial numbers from configured meters."""
     return {meter.serial_number for meter in meters if meter.serial_number}
 
 
-class SerialBusFlowMixin:
+class SerialBusFlowMixin(IneproFlowProtocol):
     """Helpers for shared-bus-backed config flow steps."""
 
     def _filter_new_bus_devices(
@@ -60,10 +61,10 @@ class SerialBusFlowMixin:
             configured_slave_ids = {
                 get_bus_route_for_meter(
                     meter,
-                    bus_entry_data=config_entry.data,
+                    bus_entry_data=dict(config_entry.data),
                 ).slave_id
                 for meter in get_configured_meters(
-                    config_entry.data,
+                    dict(config_entry.data),
                     title=config_entry.title,
                 )
             }
@@ -76,10 +77,10 @@ class SerialBusFlowMixin:
                 configured_slave_ids = {
                     get_bus_route_for_meter(
                         meter,
-                        bus_entry_data=existing_entry.data,
+                        bus_entry_data=dict(existing_entry.data),
                     ).slave_id
                     for meter in get_configured_meters(
-                        existing_entry.data,
+                        dict(existing_entry.data),
                         title=existing_entry.title,
                     )
                 }
@@ -108,14 +109,13 @@ class SerialBusFlowMixin:
     ) -> tuple[DiscoveredGrowMeter, ...]:
         """Return the previously discovered meters matching the selected keys."""
         normalized_keys = (
-            {selected_keys}
-            if isinstance(selected_keys, str)
-            else set(selected_keys)
+            {selected_keys} if isinstance(selected_keys, str) else set(selected_keys)
         )
-        selected: list[DiscoveredGrowMeter] = []
-        for discovered_meter in self._discovered_bus_devices:
-            if discovered_meter_key(discovered_meter) in normalized_keys:
-                selected.append(discovered_meter)
+        selected = [
+            discovered_meter
+            for discovered_meter in self._discovered_bus_devices
+            if discovered_meter_key(discovered_meter) in normalized_keys
+        ]
 
         if not selected or len(selected) != len(normalized_keys):
             raise ValueError(f"Unknown discovered meter selection: {selected_keys}")
@@ -165,7 +165,9 @@ class SerialBusFlowMixin:
             if exclude_entry is not None and entry.entry_id == exclude_entry.entry_id:
                 continue
             configured_serials.update(
-                _meter_serials(get_configured_meters(entry.data, title=entry.title))
+                _meter_serials(
+                    get_configured_meters(dict(entry.data), title=entry.title)
+                )
             )
         return configured_serials
 
@@ -193,7 +195,8 @@ class SerialBusFlowMixin:
             meters = tuple(
                 meter
                 for meter in meters
-                if meter.serial_number is None or meter.serial_number not in configured_serials
+                if meter.serial_number is None
+                or meter.serial_number not in configured_serials
             )
             if not meters and transport is not TransportType.TCP_GATEWAY:
                 return self.async_abort(reason="already_configured")
@@ -213,8 +216,7 @@ class SerialBusFlowMixin:
                 CONF_SCAN_INTERVAL: scan_interval,
                 **bus_entry_data,
                 CONF_METERS: [
-                    serialize_configured_meter(meter)
-                    for meter in configured_meters
+                    serialize_configured_meter(meter) for meter in configured_meters
                 ],
             }
             await self.async_set_unique_id(build_bus_unique_id(entry_data))
@@ -229,26 +231,34 @@ class SerialBusFlowMixin:
             )
 
         existing_meters = list(
-            get_configured_meters(existing_entry.data, title=existing_entry.title)
+            get_configured_meters(
+                dict(existing_entry.data),
+                title=existing_entry.title,
+            )
         )
         existing_slave_ids = {
             get_bus_route_for_meter(
                 meter,
-                bus_entry_data=existing_entry.data,
+                bus_entry_data=dict(existing_entry.data),
             ).slave_id
             for meter in existing_meters
         }
-        existing_serials = _meter_serials(existing_meters) | self._configured_meter_serials(
+        existing_serials = _meter_serials(
+            existing_meters
+        ) | self._configured_meter_serials(
             exclude_entry=existing_entry,
         )
         new_meters = [
             ensure_bus_meter_routes(
                 meter,
-                bus_entry_data=existing_entry.data,
+                bus_entry_data=dict(existing_entry.data),
             )
             for meter in meters
             if meter.slave_id not in existing_slave_ids
-            and (meter.serial_number is None or meter.serial_number not in existing_serials)
+            and (
+                meter.serial_number is None
+                or meter.serial_number not in existing_serials
+            )
         ]
         if not new_meters:
             return self.async_abort(reason="already_configured")
@@ -257,7 +267,7 @@ class SerialBusFlowMixin:
             serialize_configured_meter(
                 ensure_bus_meter_routes(
                     meter,
-                    bus_entry_data=existing_entry.data,
+                    bus_entry_data=dict(existing_entry.data),
                 )
             )
             for meter in (*existing_meters, *new_meters)
@@ -353,6 +363,6 @@ class SerialBusFlowMixin:
     def _configured_meters(self) -> tuple[ConfiguredMeter, ...]:
         """Return the meters configured under this entry."""
         return get_configured_meters(
-            self._config_entry.data,
+            dict(self._config_entry.data),
             title=self._config_entry.title,
         )

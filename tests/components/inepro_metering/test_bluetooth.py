@@ -21,20 +21,21 @@ from custom_components.inepro_metering.modbus import (
     CONF_BLUETOOTH_FORCE_REPAIR,
     CONF_BLUETOOTH_PAIRING_MODE,
 )
+from homeassistant.core import HomeAssistant
 
 
 def test_grow_bluetooth_meter_from_service_info_returns_library_model() -> None:
     """The HA adapter should translate one Bluetooth advertisement into the shared model."""
     meter = grow_bluetooth_meter_from_service_info(
         SimpleNamespace(
-            name="IM-075625100001",
+            name="IM-075625480002",
             address="80:F1:B2:58:DD:5A",
             rssi=-88,
         )
     )
 
     assert meter is not None
-    assert meter.serial_number == "075625100001"
+    assert meter.serial_number == "075625480002"
     assert meter.variant == "grow_750"
     assert meter.address == "80:F1:B2:58:DD:5A"
     assert meter.transport is TransportType.BLUETOOTH
@@ -53,16 +54,18 @@ def test_grow_bluetooth_meter_from_service_info_rejects_unknown_names() -> None:
     assert meter is None
 
 
-def test_async_discover_grow_bluetooth_meters_prefers_strongest_rssi(hass) -> None:
+def test_async_discover_grow_bluetooth_meters_prefers_strongest_rssi(
+    hass: HomeAssistant,
+) -> None:
     """The HA adapter should deduplicate cache hits by serial number and keep the best RSSI."""
     service_infos = [
         SimpleNamespace(
-            name="IM-075625100001",
+            name="IM-075625480002",
             address="80:F1:B2:58:DD:5A",
             rssi=-88,
         ),
         SimpleNamespace(
-            name="IM-075625100001",
+            name="IM-075625480002",
             address="80:F1:B2:58:DD:5B",
             rssi=-61,
         ),
@@ -85,20 +88,20 @@ def test_async_discover_grow_bluetooth_meters_prefers_strongest_rssi(hass) -> No
         meters = async_discover_grow_bluetooth_meters(hass)
 
     assert [meter.serial_number for meter in meters] == [
-        "075625100001",
+        "075625480002",
         "085125250008",
     ]
     assert meters[0].address == "80:F1:B2:58:DD:5B"
     assert meters[0].transport is TransportType.BLUETOOTH
 
 
-def test_entry_data_uses_pairing_never_by_default(hass) -> None:
+def test_entry_data_uses_pairing_never_by_default(hass: HomeAssistant) -> None:
     """Normal setup and runtime validation should not start pairing in HA."""
-    ble_device = SimpleNamespace(name="IM-075625100001", address="80:F1:B2:58:DD:5A")
+    ble_device = SimpleNamespace(name="IM-075625480002", address="80:F1:B2:58:DD:5A")
     entry_data = {
         CONF_TRANSPORT: TransportType.BLUETOOTH.value,
         CONF_BLUETOOTH_ADDRESS: "80:F1:B2:58:DD:5A",
-        CONF_BLUETOOTH_NAME: "IM-075625100001",
+        CONF_BLUETOOTH_NAME: "IM-075625480002",
     }
 
     with patch(

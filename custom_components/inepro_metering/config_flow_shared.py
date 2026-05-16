@@ -1,10 +1,8 @@
 """Shared helpers and constants for the Inepro Metering config flow."""
 
-from __future__ import annotations
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from typing import Any, Awaitable, Callable
-
-from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_TIMEOUT
 from inepro_metering.ble import (
     BleGattDeviceInformation,
     IneproBleDeviceInformationMissingError,
@@ -14,6 +12,8 @@ from inepro_metering.ble import (
     IneproBleServicesMissingError,
     is_ble_pairing_trigger_error,
 )
+
+from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_TIMEOUT
 
 from .bluetooth import (
     DiscoveredGrowBluetoothMeter,
@@ -65,7 +65,6 @@ CONF_RESET_BLUETOOTH_PAIRING = "reset_bluetooth_pairing"
 CONF_BLUETOOTH_PAIRING_PIN = "bluetooth_pairing_pin"
 CONF_SELECTED_METER = "selected_meter"
 
-OPTION_ACTION_UPDATE_POLLING = "update_polling"
 OPTION_ACTION_SCAN_SERIAL = "scan_serial"
 OPTION_ACTION_UPDATE_CONNECTION = "update_connection"
 OPTION_ACTION_EDIT_SERIAL_BUS = "edit_serial_bus"
@@ -137,7 +136,9 @@ async def async_resolve_entry_serial_number_for_creation(
     """Resolve the serial number to persist for a new config entry."""
     if entry_data.get(CONF_FAMILY) == MeterFamily.GROW.value:
         configured_serial = configured_grow_serial(entry_data)
-        product_code = None if configured_serial is None else configured_serial.product_code
+        product_code = (
+            None if configured_serial is None else configured_serial.product_code
+        )
         return await read_detected_grow_serial(
             entry_data,
             product_code=product_code,
@@ -205,7 +206,9 @@ async def async_validate_bluetooth_gatt_identity(
         missing_serial = IneproBleDeviceInformationMissingError(
             "Missing BLE GATT serial number"
         )
-        raise IneproConnectionError("Missing BLE GATT serial number") from missing_serial
+        raise IneproConnectionError(
+            "Missing BLE GATT serial number"
+        ) from missing_serial
 
     configured_serial = configured_entry_serial_number(entry_data)
     if configured_serial is not None and gatt_serial != configured_serial:
@@ -297,8 +300,7 @@ def user_visible_transports(
     return tuple(
         transport
         for transport in transports
-        if transport not in EXPERIMENTAL_TRANSPORTS
-        or transport is include_transport
+        if transport not in EXPERIMENTAL_TRANSPORTS or transport is include_transport
     )
 
 
@@ -396,7 +398,9 @@ def bluetooth_validation_error_reason(
         return "bluetooth_device_not_found"
     if any(isinstance(cause, IneproBluetoothNotPairedError) for cause in causes):
         return "bluetooth_not_paired"
-    if any(isinstance(cause, IneproBleDeviceInformationMissingError) for cause in causes):
+    if any(
+        isinstance(cause, IneproBleDeviceInformationMissingError) for cause in causes
+    ):
         return "unsupported_device"
     if any(isinstance(cause, IneproBlePairingUnsupportedError) for cause in causes):
         return "bluetooth_pairing_unsupported"
@@ -465,8 +469,7 @@ def build_unique_id(entry_data: dict[str, Any]) -> str:
         )
     else:
         endpoint = (
-            f"{str(entry_data[CONF_HOST]).strip().lower()}:"
-            f"{int(entry_data[CONF_PORT])}"
+            f"{str(entry_data[CONF_HOST]).strip().lower()}:{int(entry_data[CONF_PORT])}"
         )
 
     return f"{endpoint}:{int(entry_data[CONF_SLAVE_ID])}"

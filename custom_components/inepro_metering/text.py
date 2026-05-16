@@ -1,13 +1,14 @@
 """Text platform for TCP gateway configuration fields."""
 
-from __future__ import annotations
+from inepro_metering.gateway_settings import (
+    GatewaySettingDescription,
+    get_gateway_settings,
+)
 
 from homeassistant.components.text import TextEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
-from inepro_metering.gateway_settings import GatewaySettingDescription, get_gateway_settings
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .gateway_support import IneproGatewayEntity, entry_supports_gateway_management
 
@@ -15,7 +16,7 @@ from .gateway_support import IneproGatewayEntity, entry_supports_gateway_managem
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up TCP gateway text entities from a config entry."""
     del hass
@@ -61,7 +62,11 @@ class IneproGatewayText(
         if actual_value is not None and self._optimistic_value == actual_value:
             self._optimistic_value = None
 
-        return self._optimistic_value if self._optimistic_value is not None else actual_value
+        return (
+            self._optimistic_value
+            if self._optimistic_value is not None
+            else actual_value
+        )
 
     async def async_set_value(self, value: str) -> None:
         """Write a new text value back to the gateway."""
@@ -71,7 +76,7 @@ class IneproGatewayText(
         try:
             await self.coordinator.async_write_gateway_setting(
                 setting_key=self._setting.key,
-                value=value,
+                value=normalized_value,
             )
             await self.coordinator.async_request_refresh()
         except Exception:

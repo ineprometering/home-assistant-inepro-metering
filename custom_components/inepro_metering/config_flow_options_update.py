@@ -1,47 +1,51 @@
 """Options/update workflow steps for the Inepro Metering config flow."""
 
-from __future__ import annotations
-
 from typing import Any
 
+from inepro_metering.routes import MeterRouteDefinition
 import voluptuous as vol
 
 from homeassistant.config_entries import SOURCE_RECONFIGURE
-from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_SCAN_INTERVAL, CONF_TIMEOUT
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_NAME,
+    CONF_PORT,
+    CONF_SCAN_INTERVAL,
+    CONF_TIMEOUT,
+)
 from homeassistant.data_entry_flow import FlowResult
 
+from .bluetooth import IneproBluetoothDeviceNotFound
+from .config_flow_protocols import IneproFlowProtocol
 from .config_flow_schemas import (
+    build_action_schema,
     build_add_route_bluetooth_discovered_schema,
     build_add_route_connection_schema,
     build_add_route_purpose_schema,
     build_add_route_schema,
-    build_action_schema,
     build_discovered_serial_schema,
     build_edit_serial_bus_schema,
     build_select_meter_schema,
     build_serial_bus_scan_schema,
     build_switch_route_schema,
     build_update_connection_schema,
-    build_update_polling_schema,
 )
-from .bluetooth import IneproBluetoothDeviceNotFound
 from .config_flow_shared import (
-    CONFIG_ENTRY_VERSION,
     CONF_ACTION,
     CONF_DISCOVERED_BLUETOOTH_METER,
     CONF_DISCOVERED_METERS,
     CONF_SELECTED_METER,
     CONF_SELECTED_ROUTE,
+    CONFIG_ENTRY_VERSION,
     OPTION_ACTION_ADD_ROUTE,
     OPTION_ACTION_EDIT_SERIAL_BUS,
     OPTION_ACTION_MANAGE_METER_ROUTES,
     OPTION_ACTION_SCAN_SERIAL,
     OPTION_ACTION_SWITCH_ROUTE,
     OPTION_ACTION_UPDATE_CONNECTION,
-    OPTION_ACTION_UPDATE_POLLING,
     IneproIdentityError,
-    bluetooth_meter_key,
     bluetooth_gatt_validation_data,
+    bluetooth_meter_key,
     bluetooth_modbus_pairing_validation_data,
     bluetooth_validation_error_reason,
     configured_entry_serial_number,
@@ -59,10 +63,10 @@ from .const import (
     CONF_FAMILY,
     CONF_METERS,
     CONF_PARITY,
-    CONF_ROUTES,
     CONF_ROUTE_PURPOSE,
-    CONF_SERIAL_PORT,
+    CONF_ROUTES,
     CONF_SERIAL_NUMBER,
+    CONF_SERIAL_PORT,
     CONF_SLAVE_ID,
     CONF_STOPBITS,
     CONF_TRANSPORT,
@@ -94,8 +98,10 @@ from .modbus import IneproConnectionError
 from .models import get_profile
 
 
-class OptionsUpdateFlowMixin:
+class OptionsUpdateFlowMixin(IneproFlowProtocol):
     """Options/update steps for existing Inepro Metering entries."""
+
+    _selected_meter_key: str | None
 
     async def _async_finish_entry_update(
         self,
@@ -139,11 +145,15 @@ class OptionsUpdateFlowMixin:
         user_input: dict[str, Any] | None = None,
     ) -> FlowResult:
         """Choose how to update an existing entry."""
-        if user_input is None and not (
-            self._supports_serial_rescan
-            or self._supports_route_management
-            or self._supports_bus_meter_route_management
-        ) and self._supports_connection_update:
+        if (
+            user_input is None
+            and not (
+                self._supports_serial_rescan
+                or self._supports_route_management
+                or self._supports_bus_meter_route_management
+            )
+            and self._supports_connection_update
+        ):
             return await self.async_step_update_connection()
 
         if user_input is not None:
@@ -161,7 +171,6 @@ class OptionsUpdateFlowMixin:
                 if self._supports_serial_rescan:
                     return await self.async_step_edit_serial_bus()
                 return await self.async_step_update_connection()
-            return await self.async_step_update_polling()
 
         return self.async_show_form(
             step_id="init",
@@ -204,7 +213,9 @@ class OptionsUpdateFlowMixin:
                 OPTION_ACTION_UPDATE_CONNECTION,
             ),
             description_placeholders={
-                "meter": self._selected_meter.name if self._selected_meter is not None else "",
+                "meter": self._selected_meter.name
+                if self._selected_meter is not None
+                else "",
             },
         )
 
@@ -244,7 +255,7 @@ class OptionsUpdateFlowMixin:
                     bus_entry_data=self._config_entry.data,
                 )
                 if transport is TransportType.SERIAL:
-                    updated_bus_route = ConfiguredRoute(
+                    updated_bus_route = MeterRouteDefinition(
                         transport=TransportType.SERIAL,
                         slave_id=int(user_input[meter_slave_id_field(meter)]),
                         timeout=int(user_input[CONF_TIMEOUT]),
@@ -256,7 +267,7 @@ class OptionsUpdateFlowMixin:
                         stopbits=int(user_input[CONF_STOPBITS]),
                     )
                 else:
-                    updated_bus_route = ConfiguredRoute(
+                    updated_bus_route = MeterRouteDefinition(
                         transport=TransportType.TCP_GATEWAY,
                         slave_id=int(user_input[meter_slave_id_field(meter)]),
                         timeout=int(user_input[CONF_TIMEOUT]),
@@ -288,13 +299,10 @@ class OptionsUpdateFlowMixin:
                     )
                 )
             return await self._async_finish_entry_update(
-                title=str(user_input[CONF_NAME]).strip() or self._config_entry.title,
                 data={
                     **updated_bus_data,
-                    CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
                     CONF_METERS: [
-                        serialize_configured_meter(meter)
-                        for meter in meters
+                        serialize_configured_meter(meter) for meter in meters
                     ],
                 },
                 version=CONFIG_ENTRY_VERSION,
@@ -304,7 +312,6 @@ class OptionsUpdateFlowMixin:
             step_id="edit_serial_bus",
             data_schema=build_edit_serial_bus_schema(
                 self._config_entry.data,
-                self._config_entry.title,
                 self._configured_meters,
                 user_input,
             ),
@@ -317,31 +324,6 @@ class OptionsUpdateFlowMixin:
                     else "Modbus TCP gateway bus"
                 ),
             },
-        )
-
-    async def async_step_update_polling(
-        self,
-        user_input: dict[str, Any] | None = None,
-    ) -> FlowResult:
-        """Update the polling interval for the current entry."""
-        if user_input is not None:
-            return await self._async_finish_entry_update(
-                data={
-                    **self._config_entry.data,
-                    CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
-                },
-            )
-
-        return self.async_show_form(
-            step_id="update_polling",
-            data_schema=build_update_polling_schema(
-                int(
-                    self._config_entry.data.get(
-                        CONF_SCAN_INTERVAL,
-                        DEFAULT_SCAN_INTERVAL,
-                    )
-                )
-            ),
         )
 
     async def async_step_update_connection(
@@ -359,7 +341,11 @@ class OptionsUpdateFlowMixin:
                 transport=transport,
                 connection_data=connection_data,
                 slave_id=int(user_input[CONF_SLAVE_ID]),
-                scan_interval=int(user_input[CONF_SCAN_INTERVAL]),
+                scan_interval=int(
+                    self._config_entry.data.get(
+                        CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+                    )
+                ),
             )
             route_validation_data = self._route_validation_entry_data(updated_data)
             gatt_validation_data = bluetooth_gatt_validation_data(route_validation_data)
@@ -423,7 +409,10 @@ class OptionsUpdateFlowMixin:
         """Choose the transport for one additional route."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            if TransportType(user_input[CONF_TRANSPORT]) not in self._supported_route_transports:
+            if (
+                TransportType(user_input[CONF_TRANSPORT])
+                not in self._supported_route_transports
+            ):
                 errors["base"] = "transport_required"
                 return self.async_show_form(
                     step_id="add_route",
@@ -457,7 +446,10 @@ class OptionsUpdateFlowMixin:
         """Choose whether a helper-capable route should be active or helper-only."""
         if user_input is not None:
             self._route_selection[CONF_ROUTE_PURPOSE] = user_input[CONF_ROUTE_PURPOSE]
-            if TransportType(self._route_selection[CONF_TRANSPORT]) is TransportType.BLUETOOTH:
+            if (
+                TransportType(self._route_selection[CONF_TRANSPORT])
+                is TransportType.BLUETOOTH
+            ):
                 return await self.async_step_add_route_bluetooth_scan()
             return await self.async_step_add_route_connection()
 
@@ -471,7 +463,9 @@ class OptionsUpdateFlowMixin:
         user_input: dict[str, Any] | None = None,
     ) -> FlowResult:
         """Scan Home Assistant's Bluetooth cache before adding a route."""
-        self._discovered_bluetooth_devices = self._async_discover_route_bluetooth_meters()
+        self._discovered_bluetooth_devices = (
+            self._async_discover_route_bluetooth_meters()
+        )
         if self._discovered_bluetooth_devices:
             return await self.async_step_add_route_bluetooth_discovered()
 
@@ -490,7 +484,6 @@ class OptionsUpdateFlowMixin:
     ) -> FlowResult:
         """Choose a discovered Bluetooth meter for a new route."""
         errors: dict[str, str] = {}
-        transport = TransportType.BLUETOOTH
 
         if user_input is not None:
             discovered_meter = self._get_discovered_bluetooth_meter(
@@ -556,13 +549,17 @@ class OptionsUpdateFlowMixin:
             selected_route_key = str(user_input[CONF_SELECTED_ROUTE])
             routes = list(self._configured_routes)
             selected_route = next(
-                (route for route in routes if build_route_key(route) == selected_route_key),
+                (
+                    route
+                    for route in routes
+                    if build_route_key(route) == selected_route_key
+                ),
                 None,
             )
             if selected_route is None:
                 errors["base"] = "route_not_found"
             else:
-                promoted_route = ConfiguredRoute(
+                promoted_route = MeterRouteDefinition(
                     transport=selected_route.transport,
                     slave_id=selected_route.slave_id,
                     timeout=selected_route.timeout,
@@ -589,7 +586,9 @@ class OptionsUpdateFlowMixin:
                     slave_id=promoted_route.slave_id,
                     scan_interval=int(self._config_entry.data[CONF_SCAN_INTERVAL]),
                 )
-                route_validation_data = self._route_validation_entry_data(candidate_data)
+                route_validation_data = self._route_validation_entry_data(
+                    candidate_data
+                )
                 gatt_validation_data = bluetooth_gatt_validation_data(
                     route_validation_data
                 )
@@ -604,7 +603,9 @@ class OptionsUpdateFlowMixin:
                 gatt_validated = False
                 modbus_validated = False
                 try:
-                    await self._async_validate_bluetooth_gatt_identity(gatt_validation_data)
+                    await self._async_validate_bluetooth_gatt_identity(
+                        gatt_validation_data
+                    )
                     gatt_validated = True
                     if promoted_route.transport is not TransportType.BLUETOOTH:
                         await self._async_validate_modbus_config(validation_data)
@@ -643,7 +644,9 @@ class OptionsUpdateFlowMixin:
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            if int(user_input[CONF_SLAVE_ID_START]) > int(user_input[CONF_SLAVE_ID_END]):
+            if int(user_input[CONF_SLAVE_ID_START]) > int(
+                user_input[CONF_SLAVE_ID_END]
+            ):
                 errors["base"] = "invalid_scan_range"
                 return self.async_show_form(
                     step_id="serial_bus_scan",
@@ -655,13 +658,20 @@ class OptionsUpdateFlowMixin:
                 )
 
             self._bus_scan_defaults = {
-                CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+                CONF_SCAN_INTERVAL: int(
+                    self._config_entry.data.get(
+                        CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+                    )
+                ),
                 CONF_SLAVE_ID_START: int(user_input[CONF_SLAVE_ID_START]),
                 CONF_SLAVE_ID_END: int(user_input[CONF_SLAVE_ID_END]),
             }
 
             try:
-                if TransportType(self._config_entry.data[CONF_TRANSPORT]) is TransportType.TCP_GATEWAY:
+                if (
+                    TransportType(self._config_entry.data[CONF_TRANSPORT])
+                    is TransportType.TCP_GATEWAY
+                ):
                     discovered = await self._async_discover_grow_tcp_gateway(
                         self._bus_connection_data,
                         slave_id_start=self._bus_scan_defaults[CONF_SLAVE_ID_START],
@@ -739,10 +749,8 @@ class OptionsUpdateFlowMixin:
             return await self._async_finish_entry_update(
                 data={
                     **self._config_entry.data,
-                    CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
                     CONF_METERS: [
-                        serialize_configured_meter(meter)
-                        for meter in merged_meters
+                        serialize_configured_meter(meter) for meter in merged_meters
                     ],
                 },
                 version=CONFIG_ENTRY_VERSION,
@@ -750,18 +758,7 @@ class OptionsUpdateFlowMixin:
 
         return self.async_show_form(
             step_id="serial_bus_discovered",
-            data_schema=build_discovered_serial_schema(
-                self._discovered_bus_devices,
-                scan_interval_default=self._bus_scan_defaults.get(
-                    CONF_SCAN_INTERVAL,
-                    int(
-                        self._config_entry.data.get(
-                            CONF_SCAN_INTERVAL,
-                            DEFAULT_SCAN_INTERVAL,
-                        )
-                    ),
-                ),
-            ),
+            data_schema=build_discovered_serial_schema(self._discovered_bus_devices),
             description_placeholders={
                 "count": str(len(self._discovered_bus_devices)),
             },
@@ -778,7 +775,7 @@ class OptionsUpdateFlowMixin:
             return OPTION_ACTION_UPDATE_CONNECTION
         if self._supports_connection_update:
             return OPTION_ACTION_UPDATE_CONNECTION
-        return OPTION_ACTION_UPDATE_POLLING
+        return OPTION_ACTION_EDIT_SERIAL_BUS
 
     @property
     def _action_options(self) -> list[dict[str, str]]:
@@ -835,12 +832,6 @@ class OptionsUpdateFlowMixin:
                     "label": "Update connection details",
                 }
             )
-        options.append(
-            {
-                "value": OPTION_ACTION_UPDATE_POLLING,
-                "label": "Update polling interval only",
-            }
-        )
         return options
 
     @property
@@ -977,7 +968,6 @@ class OptionsUpdateFlowMixin:
         return {
             **self._connection_data_from_route(self._active_route),
             CONF_SLAVE_ID: self._active_route.slave_id,
-            CONF_SCAN_INTERVAL: int(self._config_entry.data[CONF_SCAN_INTERVAL]),
         }
 
     def _transport_supports_helper_only_routes(
@@ -1087,7 +1077,9 @@ class OptionsUpdateFlowMixin:
         for discovered_meter in self._discovered_bluetooth_devices:
             if bluetooth_meter_key(discovered_meter) == selected_key:
                 return discovered_meter
-        raise ValueError(f"Unknown discovered Bluetooth meter selection: {selected_key}")
+        raise ValueError(
+            f"Unknown discovered Bluetooth meter selection: {selected_key}"
+        )
 
     @property
     def _route_meter_serial_number(self) -> str | None:
@@ -1184,7 +1176,9 @@ class OptionsUpdateFlowMixin:
             **base_data,
         }
 
-    def _route_validation_entry_data(self, entry_data: dict[str, Any]) -> dict[str, Any]:
+    def _route_validation_entry_data(
+        self, entry_data: dict[str, Any]
+    ) -> dict[str, Any]:
         """Return top-level route data without stored route-selection metadata."""
         return {
             key: value

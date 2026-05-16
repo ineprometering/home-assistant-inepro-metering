@@ -1,20 +1,18 @@
 """Config flow for Inepro Metering."""
 
-from __future__ import annotations
-
 import logging
-from typing import Any
+from typing import Any, cast
 
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 from homeassistant.const import CONF_NAME, CONF_SCAN_INTERVAL
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 
 from .bluetooth import (
     DiscoveredGrowBluetoothMeter,
     async_discover_grow_bluetooth_meters,
-    async_entry_data_with_ha_ble_device,
     async_discover_grow_bluetooth_proxy_meters,
+    async_entry_data_with_ha_ble_device,
     grow_bluetooth_meter_from_service_info,
 )
 from .config_flow_create_discovery import CreateDiscoveryFlowMixin
@@ -22,23 +20,22 @@ from .config_flow_create_manual import CreateManualFlowMixin
 from .config_flow_options_update import OptionsUpdateFlowMixin
 from .config_flow_serial_bus import SerialBusFlowMixin
 from .config_flow_shared import (
-    CONFIG_ENTRY_VERSION,
     CONF_ACTION as SHARED_CONF_ACTION,
     CONF_DISCOVERED_BLUETOOTH_METER as SHARED_CONF_DISCOVERED_BLUETOOTH_METER,
     CONF_DISCOVERED_METERS as SHARED_CONF_DISCOVERED_METERS,
     CONF_SELECTED_METER as SHARED_CONF_SELECTED_METER,
     CONF_SELECTED_ROUTE as SHARED_CONF_SELECTED_ROUTE,
-    OPTION_ACTION_EDIT_SERIAL_BUS as SHARED_OPTION_ACTION_EDIT_SERIAL_BUS,
+    CONFIG_ENTRY_VERSION,
     OPTION_ACTION_ADD_ROUTE as SHARED_OPTION_ACTION_ADD_ROUTE,
+    OPTION_ACTION_EDIT_SERIAL_BUS as SHARED_OPTION_ACTION_EDIT_SERIAL_BUS,
     OPTION_ACTION_MANAGE_METER_ROUTES as SHARED_OPTION_ACTION_MANAGE_METER_ROUTES,
     OPTION_ACTION_SCAN_SERIAL as SHARED_OPTION_ACTION_SCAN_SERIAL,
     OPTION_ACTION_SWITCH_ROUTE as SHARED_OPTION_ACTION_SWITCH_ROUTE,
     OPTION_ACTION_UPDATE_CONNECTION as SHARED_OPTION_ACTION_UPDATE_CONNECTION,
-    OPTION_ACTION_UPDATE_POLLING as SHARED_OPTION_ACTION_UPDATE_POLLING,
     IneproIdentityError as SharedIneproIdentityError,
     async_read_detected_grow_serial as shared_read_detected_serial,
-    async_validate_bluetooth_gatt_identity as shared_validate_bluetooth_gatt_identity,
     async_resolve_entry_serial_number_for_creation as shared_resolve_entry_serial,
+    async_validate_bluetooth_gatt_identity as shared_validate_bluetooth_gatt_identity,
     async_validate_entry_identity as shared_validate_entry_identity,
     bluetooth_meter_key,
     build_unique_id,
@@ -49,7 +46,6 @@ from .config_flow_shared import (
     normalize_connection_data,
     user_value,
 )
-from .const import DOMAIN, TransportType
 from .const import (
     CONF_FAMILY,
     CONF_METERS,
@@ -57,6 +53,8 @@ from .const import (
     CONF_SLAVE_ID,
     CONF_TRANSPORT,
     CONF_VARIANT,
+    DOMAIN,
+    TransportType,
 )
 from .discovery import (
     DiscoveredGrowMeter,
@@ -65,10 +63,7 @@ from .discovery import (
     async_discover_grow_tcp_gateway,
     async_discover_tcp_gateways,
 )
-from .modbus import (
-    IneproModbusClient,
-    async_validate_modbus_config,
-)
+from .modbus import IneproModbusClient, async_validate_modbus_config
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,7 +80,6 @@ OPTION_ACTION_MANAGE_METER_ROUTES = SHARED_OPTION_ACTION_MANAGE_METER_ROUTES
 OPTION_ACTION_SCAN_SERIAL = SHARED_OPTION_ACTION_SCAN_SERIAL
 OPTION_ACTION_SWITCH_ROUTE = SHARED_OPTION_ACTION_SWITCH_ROUTE
 OPTION_ACTION_UPDATE_CONNECTION = SHARED_OPTION_ACTION_UPDATE_CONNECTION
-OPTION_ACTION_UPDATE_POLLING = SHARED_OPTION_ACTION_UPDATE_POLLING
 IneproIdentityError = SharedIneproIdentityError
 _normalize_connection_data = normalize_connection_data
 _build_unique_id = build_unique_id
@@ -130,13 +124,19 @@ async def _async_validate_entry_identity(entry_data: dict[str, Any]) -> None:
 class _ConfigFlowDependencyBridge:
     """Bridge extracted mixins back to patchable config_flow module globals."""
 
-    def _runtime_entry_data_for_validation(self, entry_data: dict[str, Any]) -> dict[str, Any]:
+    hass: HomeAssistant
+
+    def _runtime_entry_data_for_validation(
+        self, entry_data: dict[str, Any]
+    ) -> dict[str, Any]:
         """Return entry data with temporary runtime-only validation objects."""
         return async_entry_data_with_ha_ble_device(self.hass, entry_data)
 
     async def _async_validate_modbus_config(self, entry_data: dict[str, Any]) -> None:
         """Validate one connection using the patchable module helper."""
-        await async_validate_modbus_config(self._runtime_entry_data_for_validation(entry_data))
+        await async_validate_modbus_config(
+            self._runtime_entry_data_for_validation(entry_data)
+        )
 
     async def _async_validate_bluetooth_gatt_identity(
         self,
@@ -238,11 +238,13 @@ class IneproMeteringConfigFlow(
         """Return the options flow handler for this config entry."""
         return IneproMeteringOptionsFlow(config_entry)
 
-    def __init__(self) -> None:
+    def __init__(self) -> None:  # pylint: disable=super-init-not-called
         """Initialize the config flow."""
         self._config_entry: ConfigEntry | None = None
         self._meter_selection: dict[str, Any] = {}
-        self._discovered_bluetooth_devices: tuple[DiscoveredGrowBluetoothMeter, ...] = ()
+        self._discovered_bluetooth_devices: tuple[
+            DiscoveredGrowBluetoothMeter, ...
+        ] = ()
         self._discovered_bus_devices: tuple[DiscoveredGrowMeter, ...] = ()
         self._discovered_gateways: tuple[DiscoveredTcpGateway, ...] = ()
         self._bus_scan_connection: dict[str, Any] = {}
@@ -256,7 +258,7 @@ class IneproMeteringConfigFlow(
     async def async_step_reconfigure(
         self,
         user_input: dict[str, Any] | None = None,
-    ):
+    ) -> ConfigFlowResult:
         """Update one existing entry without removing and recreating it."""
         del user_input
         self._config_entry = self._get_reconfigure_entry()
@@ -265,11 +267,16 @@ class IneproMeteringConfigFlow(
             self._abort_if_unique_id_mismatch()
 
         if CONF_METERS in self._config_entry.data:
-            return await self.async_step_edit_serial_bus()
+            return cast(
+                ConfigFlowResult,
+                await self.async_step_edit_serial_bus(),
+            )
 
         self._meter_selection = {
             CONF_FAMILY: str(self._config_entry.data[CONF_FAMILY]),
-            CONF_NAME: str(self._config_entry.data.get(CONF_NAME, self._config_entry.title)),
+            CONF_NAME: str(
+                self._config_entry.data.get(CONF_NAME, self._config_entry.title)
+            ),
             CONF_VARIANT: str(self._config_entry.data[CONF_VARIANT]),
             CONF_SLAVE_ID: int(self._config_entry.data[CONF_SLAVE_ID]),
             CONF_SCAN_INTERVAL: int(self._config_entry.data[CONF_SCAN_INTERVAL]),
@@ -281,12 +288,18 @@ class IneproMeteringConfigFlow(
             )
 
         if len(self._available_transports_for_current_flow) > 1:
-            return await self.async_step_transport()
+            return cast(
+                ConfigFlowResult,
+                await self.async_step_transport(),
+            )
 
         self._meter_selection[CONF_TRANSPORT] = (
             self._available_transports_for_current_flow[0].value
         )
-        return await self.async_step_connection()
+        return cast(
+            ConfigFlowResult,
+            await self.async_step_connection(),
+        )
 
 
 class IneproMeteringOptionsFlow(
@@ -297,14 +310,17 @@ class IneproMeteringOptionsFlow(
 ):
     """Handle options for Inepro Metering entries."""
 
+    # pylint: disable-next=super-init-not-called
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize the options flow."""
         self._config_entry = config_entry
-        self._discovered_bluetooth_devices: tuple[DiscoveredGrowBluetoothMeter, ...] = ()
+        self._discovered_bluetooth_devices: tuple[
+            DiscoveredGrowBluetoothMeter, ...
+        ] = ()
         self._discovered_bus_devices: tuple[DiscoveredGrowMeter, ...] = ()
         self._bus_scan_defaults: dict[str, Any] = {}
         self._bus_scan_transport: TransportType | None = None
         self._route_selection: dict[str, Any] = {}
         self._selected_meter_key: str | None = None
 
-
+    hass: Any

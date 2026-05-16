@@ -1,18 +1,16 @@
 """Helpers for config-entry data shapes used by Inepro Metering."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_TIMEOUT
 from inepro_metering.routes import (
     MeterRouteDefinition,
     RouteEndpoint,
     build_route_key,
-    describe_route,
     route_matches_endpoint,
 )
+
+from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_TIMEOUT
 
 from .const import (
     CONF_ACTIVE_ROUTE,
@@ -37,6 +35,11 @@ from .const import (
 from .discovery import parse_grow_serial_number
 from .models import get_profile_for_variant
 
+if TYPE_CHECKING:
+    type ConfiguredRoute = MeterRouteDefinition
+else:
+    ConfiguredRoute = MeterRouteDefinition
+
 
 @dataclass(frozen=True, slots=True)
 class ConfiguredMeter:
@@ -50,9 +53,6 @@ class ConfiguredMeter:
     product_code: str | None = None
     routes: tuple[ConfiguredRoute, ...] = ()
     active_route: str | None = None
-
-
-ConfiguredRoute = MeterRouteDefinition
 
 
 BUS_TRANSPORTS = {
@@ -75,21 +75,26 @@ RouteDeduplicationKey = tuple[str, ...]
 
 def is_bus_entry(data: dict[str, Any]) -> bool:
     """Return whether the config entry represents a shared Modbus bus container."""
-    return (
-        TransportType(data[CONF_TRANSPORT]) in BUS_TRANSPORTS
-        and CONF_METERS in data
-    )
+    return TransportType(data[CONF_TRANSPORT]) in BUS_TRANSPORTS and CONF_METERS in data
 
 
 def is_serial_bus_entry(data: dict[str, Any]) -> bool:
     """Return whether the config entry represents a serial bus container."""
-    return is_bus_entry(data) and TransportType(data[CONF_TRANSPORT]) is TransportType.SERIAL
+    return (
+        is_bus_entry(data)
+        and TransportType(data[CONF_TRANSPORT]) is TransportType.SERIAL
+    )
 
 
-def get_configured_meters(data: dict[str, Any], *, title: str) -> tuple[ConfiguredMeter, ...]:
+def get_configured_meters(
+    data: dict[str, Any], *, title: str
+) -> tuple[ConfiguredMeter, ...]:
     """Return configured meters for both new bus and legacy single-meter entries."""
     if is_bus_entry(data):
-        return tuple(_configured_meter_from_mapping(meter_data) for meter_data in data[CONF_METERS])
+        return tuple(
+            _configured_meter_from_mapping(meter_data)
+            for meter_data in data[CONF_METERS]
+        )
 
     serial_number, product_code = _configured_single_entry_identity(data, title=title)
     return (
@@ -118,8 +123,7 @@ def serialize_configured_meter(meter: ConfiguredMeter) -> dict[str, Any]:
         data["product_code"] = meter.product_code
     if meter.routes:
         data[CONF_ROUTES] = [
-            serialize_configured_route(route)
-            for route in meter.routes
+            serialize_configured_route(route) for route in meter.routes
         ]
     if meter.active_route is not None:
         data[CONF_ACTIVE_ROUTE] = meter.active_route
@@ -255,7 +259,7 @@ def build_bus_route(
     """Build the canonical bus route for one shared-bus meter."""
     transport = TransportType(bus_entry_data[CONF_TRANSPORT])
     if transport is TransportType.SERIAL:
-        return ConfiguredRoute(
+        return MeterRouteDefinition(
             transport=TransportType.SERIAL,
             slave_id=int(slave_id),
             timeout=int(bus_entry_data[CONF_TIMEOUT]),
@@ -268,7 +272,7 @@ def build_bus_route(
         )
 
     if transport is TransportType.TCP_GATEWAY:
-        return ConfiguredRoute(
+        return MeterRouteDefinition(
             transport=TransportType.TCP_GATEWAY,
             slave_id=int(slave_id),
             timeout=int(bus_entry_data[CONF_TIMEOUT]),
@@ -508,7 +512,7 @@ def build_route_from_entry_data(
 ) -> ConfiguredRoute:
     """Build one configured route from top-level entry connection data."""
     route = _configured_route_from_mapping(entry_data)
-    return ConfiguredRoute(
+    return MeterRouteDefinition(
         transport=route.transport,
         slave_id=route.slave_id,
         timeout=route.timeout,
@@ -604,7 +608,9 @@ def normalize_entry_route_data(
     return with_routes_applied(
         entry_data,
         routes,
-        active_route_key=active_route_key if isinstance(active_route_key, str) else None,
+        active_route_key=active_route_key
+        if isinstance(active_route_key, str)
+        else None,
     )
 
 
@@ -687,7 +693,9 @@ def update_single_meter_tcp_route_from_zeroconf(
     return with_routes_applied(
         entry_data,
         tuple(routes),
-        active_route_key=active_route_key if isinstance(active_route_key, str) else None,
+        active_route_key=active_route_key
+        if isinstance(active_route_key, str)
+        else None,
     )
 
 
@@ -770,7 +778,9 @@ def _configured_single_entry_identity(
     """Return the stored serial and product code for one single-meter entry."""
     serial_number = data.get(CONF_SERIAL_NUMBER)
     normalized_serial = serial_number.strip() if isinstance(serial_number, str) else ""
-    parsed_serial = parse_grow_serial_number(normalized_serial) if normalized_serial else None
+    parsed_serial = (
+        parse_grow_serial_number(normalized_serial) if normalized_serial else None
+    )
 
     if parsed_serial is None:
         for candidate in (data.get(CONF_NAME), title):
@@ -827,7 +837,7 @@ def _configured_route_from_legacy_entry(data: dict[str, Any]) -> ConfiguredRoute
 
 def _configured_route_from_mapping(data: dict[str, Any]) -> ConfiguredRoute:
     """Normalize one serialized route mapping."""
-    return ConfiguredRoute(
+    return MeterRouteDefinition(
         transport=TransportType(data[CONF_TRANSPORT]),
         slave_id=int(data[CONF_SLAVE_ID]),
         timeout=int(data[CONF_TIMEOUT]),

@@ -1,38 +1,45 @@
 """Discovery-oriented creation workflow steps for the Inepro Metering config flow."""
 
-from __future__ import annotations
-
 import logging
-from typing import Any
+from typing import Any, cast
 
 import voluptuous as vol
 
-from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT, CONF_SCAN_INTERVAL, CONF_TIMEOUT
+from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
+from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_NAME,
+    CONF_PORT,
+    CONF_SCAN_INTERVAL,
+    CONF_TIMEOUT,
+)
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
+from .bluetooth import IneproBluetoothDeviceNotFound
+from .config_flow_protocols import IneproFlowProtocol
 from .config_flow_schemas import (
     UNSELECTED_TRANSPORT,
     build_bluetooth_confirm_schema,
     build_bluetooth_discovered_schema,
+    build_discovered_gateway_schema,
     build_discovered_serial_schema,
     build_gateway_discover_schema,
-    build_discovered_gateway_schema,
-    build_gateway_setup_method_schema,
     build_gateway_scan_schema,
+    build_gateway_setup_method_schema,
     build_serial_scan_schema,
     build_transport_schema,
 )
-from .bluetooth import IneproBluetoothDeviceNotFound
 from .config_flow_shared import (
     CONF_DISCOVERED_BLUETOOTH_METER,
     CONF_DISCOVERED_METERS,
     IneproIdentityError,
     bluetooth_gatt_validation_data,
+    bluetooth_meter_key,
     bluetooth_modbus_pairing_validation_data,
     bluetooth_setup_identity_error_reason,
     bluetooth_validation_error_reason,
-    bluetooth_meter_key,
-    connection_error_reason,
     normalize_connection_data,
 )
 from .const import (
@@ -46,13 +53,12 @@ from .const import (
     CONF_SLAVE_ID,
     CONF_TRANSPORT,
     CONF_VARIANT,
+    DEFAULT_BLUETOOTH_SCAN_INTERVAL,
     DEFAULT_GATEWAY_SCAN_SLAVE_ID_END,
-    DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_SLAVE_ID,
     DEFAULT_TIMEOUT,
     DOMAIN,
-    GATEWAY_SETUP_METHOD_MANUAL_IP,
     GATEWAY_SETUP_METHOD_SCAN_NETWORK,
     MeterFamily,
     TransportType,
@@ -128,7 +134,7 @@ def _has_grow_mdns_ownership_hint(
 
 
 def _exception_chain_summary(err: BaseException) -> str:
-    """Return a compact exception chain summary for connection diagnostics."""
+    """Return a compact exception chain summary for bench diagnostics."""
     parts: list[str] = []
     seen: set[int] = set()
     current: BaseException | None = err
@@ -136,19 +142,21 @@ def _exception_chain_summary(err: BaseException) -> str:
         seen.add(id(current))
         message = str(current).strip()
         parts.append(
-            type(current).__name__ if not message else f"{type(current).__name__}: {message}"
+            type(current).__name__
+            if not message
+            else f"{type(current).__name__}: {message}"
         )
         current = current.__cause__ or current.__context__
     return " <- ".join(parts)
 
 
-class CreateDiscoveryFlowMixin:
+class CreateDiscoveryFlowMixin(IneproFlowProtocol):
     """Discovery-driven creation steps for new Inepro Metering entries."""
 
     async def async_step_zeroconf(
         self,
-        discovery_info: Any,
-    ) -> FlowResult:
+        discovery_info: ZeroconfServiceInfo,
+    ) -> ConfigFlowResult:
         """Handle a GROW Modbus TCP discovery from Home Assistant Zeroconf."""
         _LOGGER.debug(
             "Zeroconf candidate received: type=%s name=%s hostname=%s address=%s port=%s",
@@ -190,7 +198,9 @@ class CreateDiscoveryFlowMixin:
             )
             return self.async_abort(reason="not_supported")
 
-        if not _has_grow_mdns_ownership_hint(discovery_info, vendor=vendor, model=model):
+        if not _has_grow_mdns_ownership_hint(
+            discovery_info, vendor=vendor, model=model
+        ):
             _LOGGER.debug(
                 "Zeroconf candidate rejected: no inepro/GROW ownership hint for serial=%s",
                 serial_number,
@@ -278,7 +288,10 @@ class CreateDiscoveryFlowMixin:
         self.context["title_placeholders"] = {
             CONF_NAME: serial_number,
         }
-        return await self.async_step_zeroconf_confirm()
+        return cast(
+            ConfigFlowResult,
+            await self.async_step_zeroconf_confirm(),
+        )
 
     async def async_step_zeroconf_confirm(
         self,
@@ -340,7 +353,9 @@ class CreateDiscoveryFlowMixin:
                             entry_data,
                             routes=(build_route_from_entry_data(entry_data),),
                         )
-                        await self.async_set_unique_id(str(entry_data[CONF_SERIAL_NUMBER]))
+                        await self.async_set_unique_id(
+                            str(entry_data[CONF_SERIAL_NUMBER])
+                        )
                         self._abort_if_unique_id_configured()
                         return self.async_create_entry(
                             title=str(entry_data[CONF_SERIAL_NUMBER]),
@@ -377,11 +392,14 @@ class CreateDiscoveryFlowMixin:
     ) -> FlowResult:
         """Choose whether to discover a gateway or enter its IP manually."""
         if user_input is not None:
-            if user_input[CONF_GATEWAY_SETUP_METHOD] == GATEWAY_SETUP_METHOD_SCAN_NETWORK:
+            if (
+                user_input[CONF_GATEWAY_SETUP_METHOD]
+                == GATEWAY_SETUP_METHOD_SCAN_NETWORK
+            ):
                 return await self.async_step_gateway_discover()
 
             self._selected_discovered_gateway = None
-            self._gateway_scan_form_defaults = {}
+            self._gateway_scan_form_defaults: dict[str, Any] = {}
             return await self.async_step_gateway_scan()
 
         return self.async_show_form(
@@ -391,8 +409,8 @@ class CreateDiscoveryFlowMixin:
 
     async def async_step_bluetooth(
         self,
-        discovery_info,
-    ) -> FlowResult:
+        discovery_info: BluetoothServiceInfoBleak,
+    ) -> ConfigFlowResult:
         """Handle a GROW Bluetooth discovery from Home Assistant."""
         discovered_meter = self._grow_bluetooth_meter_from_service_info(discovery_info)
         if discovered_meter is None:
@@ -459,14 +477,19 @@ class CreateDiscoveryFlowMixin:
         self.context["title_placeholders"] = {
             CONF_NAME: discovered_meter.serial_number,
         }
-        return await self.async_step_bluetooth_confirm()
+        return cast(
+            ConfigFlowResult,
+            await self.async_step_bluetooth_confirm(),
+        )
 
     async def async_step_bluetooth_scan(
         self,
         user_input: dict[str, Any] | None = None,
     ) -> FlowResult:
         """Scan Home Assistant's Bluetooth cache for GROW meters."""
-        self._discovered_bluetooth_devices = self._async_discover_grow_bluetooth_meters()
+        self._discovered_bluetooth_devices = (
+            self._async_discover_grow_bluetooth_meters()
+        )
         if self._discovered_bluetooth_devices:
             return await self.async_step_bluetooth_discovered()
 
@@ -539,7 +562,9 @@ class CreateDiscoveryFlowMixin:
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            if int(user_input[CONF_SLAVE_ID_START]) > int(user_input[CONF_SLAVE_ID_END]):
+            if int(user_input[CONF_SLAVE_ID_START]) > int(
+                user_input[CONF_SLAVE_ID_END]
+            ):
                 errors["base"] = "invalid_scan_range"
                 return self.async_show_form(
                     step_id="serial_scan",
@@ -552,7 +577,7 @@ class CreateDiscoveryFlowMixin:
                 user_input,
             )
             self._bus_scan_defaults = {
-                CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+                CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
                 CONF_SLAVE_ID_START: int(user_input[CONF_SLAVE_ID_START]),
                 CONF_SLAVE_ID_END: int(user_input[CONF_SLAVE_ID_END]),
             }
@@ -596,7 +621,9 @@ class CreateDiscoveryFlowMixin:
         )
 
         if user_input is not None:
-            if int(user_input[CONF_SLAVE_ID_START]) > int(user_input[CONF_SLAVE_ID_END]):
+            if int(user_input[CONF_SLAVE_ID_START]) > int(
+                user_input[CONF_SLAVE_ID_END]
+            ):
                 errors["base"] = "invalid_scan_range"
                 return self.async_show_form(
                     step_id="gateway_scan",
@@ -619,7 +646,7 @@ class CreateDiscoveryFlowMixin:
                     selected_gateway.serial_number
                 )
             self._bus_scan_defaults = {
-                CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+                CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
                 CONF_SLAVE_ID_START: int(user_input[CONF_SLAVE_ID_START]),
                 CONF_SLAVE_ID_END: int(user_input[CONF_SLAVE_ID_END]),
             }
@@ -660,8 +687,7 @@ class CreateDiscoveryFlowMixin:
                 )
                 if not self._discovered_bus_devices:
                     return await self.async_step_gateway_no_meters()
-                else:
-                    return await self.async_step_discovered()
+                return await self.async_step_discovered()
 
         return self.async_show_form(
             step_id="gateway_scan",
@@ -796,7 +822,11 @@ class CreateDiscoveryFlowMixin:
                         )
                         for discovered_meter in selected_meters
                     ),
-                    scan_interval=int(user_input[CONF_SCAN_INTERVAL]),
+                    scan_interval=int(
+                        self._bus_scan_defaults.get(
+                            CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+                        )
+                    ),
                 )
 
             return await self._async_upsert_serial_bus(
@@ -812,18 +842,16 @@ class CreateDiscoveryFlowMixin:
                     )
                     for discovered_meter in selected_meters
                 ),
-                scan_interval=int(user_input[CONF_SCAN_INTERVAL]),
+                scan_interval=int(
+                    self._bus_scan_defaults.get(
+                        CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+                    )
+                ),
             )
 
         return self.async_show_form(
             step_id="discovered",
-            data_schema=build_discovered_serial_schema(
-                self._discovered_bus_devices,
-                scan_interval_default=self._bus_scan_defaults.get(
-                    CONF_SCAN_INTERVAL,
-                    DEFAULT_SCAN_INTERVAL,
-                ),
-            ),
+            data_schema=build_discovered_serial_schema(self._discovered_bus_devices),
             description_placeholders={
                 "count": str(len(self._discovered_bus_devices)),
             },
@@ -837,22 +865,23 @@ class CreateDiscoveryFlowMixin:
         for discovered_meter in self._discovered_bluetooth_devices:
             if bluetooth_meter_key(discovered_meter) == selected_key:
                 return discovered_meter
-        raise ValueError(f"Unknown discovered Bluetooth meter selection: {selected_key}")
+        raise ValueError(
+            f"Unknown discovered Bluetooth meter selection: {selected_key}"
+        )
 
     def _get_discovered_gateway(self, selected_host: str):
         """Return the previously discovered TCP gateway matching the host."""
         for discovered_gateway in self._discovered_gateways:
-            if (
-                f"{discovered_gateway.host}:{discovered_gateway.port}"
-                == selected_host
-            ):
+            if f"{discovered_gateway.host}:{discovered_gateway.port}" == selected_host:
                 return discovered_gateway
         raise ValueError(f"Unknown discovered gateway selection: {selected_host}")
 
     def _gateway_found_summary(self, gateway) -> str:
         """Return a clear verified gateway summary for placeholders."""
         serial = f" serial {gateway.serial_number}" if gateway.serial_number else ""
-        return f"Found verified inepro gateway at {gateway.host}:{gateway.port}{serial}."
+        return (
+            f"Found verified inepro gateway at {gateway.host}:{gateway.port}{serial}."
+        )
 
     async def _async_create_bluetooth_entry(
         self,
@@ -902,7 +931,7 @@ class CreateDiscoveryFlowMixin:
             CONF_BLUETOOTH_NAME: discovered_meter.bluetooth_name,
             CONF_SLAVE_ID: int(user_input[CONF_SLAVE_ID]),
             CONF_TIMEOUT: int(user_input[CONF_TIMEOUT]),
-            CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+            CONF_SCAN_INTERVAL: DEFAULT_BLUETOOTH_SCAN_INTERVAL,
         }
         if discovered_meter.transport is TransportType.BLUETOOTH_PROXY:
             entry_data.update(
@@ -986,18 +1015,19 @@ class CreateDiscoveryFlowMixin:
                 )
 
         if step_id == "bluetooth_discovered":
-            schema_builder = lambda values: build_bluetooth_discovered_schema(
-                self._discovered_bluetooth_devices,
-                values,
-            )
+
+            def schema_builder(values):
+                return build_bluetooth_discovered_schema(
+                    self._discovered_bluetooth_devices,
+                    values,
+                )
         else:
             schema_builder = build_bluetooth_confirm_schema
 
         description_placeholders = (
             {"count": str(len(self._discovered_bluetooth_devices))}
             if step_id == "bluetooth_discovered"
-            else
-            {
+            else {
                 CONF_NAME: discovered_meter.serial_number,
                 "bluetooth_name": discovered_meter.bluetooth_name,
             }
